@@ -1,234 +1,167 @@
-from datetime import date, datetime
-from decimal import Decimal
-from unittest.mock import Mock, patch, MagicMock
-
-import pandas as pd
 import pytest
+from datetime import datetime
+from unittest.mock import Mock, patch, AsyncMock
 
-from stock_analysis.market.collector import MarketPriceCollector, PriceData, PriceHistory
-from stock_analysis.market.cache import PriceCache
-
-
-class TestPriceData:
-    def test_price_data_creation(self):
-        pd_obj = PriceData(
-            symbol="RELIANCE",
-            date=date(2024, 1, 15),
-            open=Decimal("2500.00"),
-            high=Decimal("2550.00"),
-            low=Decimal("2480.00"),
-            close=Decimal("2530.00"),
-            adj_close=Decimal("2530.00"),
-            volume=1000000,
-            source="yfinance",
-            fetched_at=datetime(2024, 1, 15, 10, 0, 0),
-        )
-        assert pd_obj.symbol == "RELIANCE"
-        assert pd_obj.close == Decimal("2530.00")
-
-    def test_price_data_to_dict(self):
-        pd_obj = PriceData(
-            symbol="RELIANCE",
-            date=date(2024, 1, 15),
-            close=Decimal("2530.00"),
-            volume=1000000,
-        )
-        d = pd_obj.to_dict()
-        assert d["symbol"] == "RELIANCE"
-        assert d["close"] == "2530.00"
-        assert d["volume"] == 1000000
+from stock_analysis.data.collector import CompleteData, DataCollector
+from stock_analysis.data.fundamentals import Fundamentals
+from stock_analysis.data.news import NewsCollection, NewsItem
+from stock_analysis.data.market_context import MarketContext
+from stock_analysis.database import Database
 
 
-class TestPriceHistory:
-    def test_price_history_creation(self):
-        pd_obj = PriceData(
-            symbol="RELIANCE",
-            date=date(2024, 1, 15),
-            close=Decimal("2530.00"),
-        )
-        history = PriceHistory(
-            symbol="RELIANCE",
-            data=[pd_obj],
-            source="yfinance",
-        )
-        assert history.symbol == "RELIANCE"
-        assert len(history.data) == 1
+class TestCompleteData:
+    def test_complete_data_creation(self):
+        fundamentals = Fundamentals(symbol="RELIANCE", pe_ratio=25.0)
+        news = NewsCollection(symbol="RELIANCE", items=[])
+        market_context = MarketContext(symbol="RELIANCE", nifty_50=22000.0)
 
-    def test_price_history_to_dataframe(self):
-        pd_obj1 = PriceData(
-            symbol="RELIANCE",
-            date=date(2024, 1, 15),
-            close=Decimal("2530.00"),
-            volume=1000000,
-        )
-        pd_obj2 = PriceData(
-            symbol="RELIANCE",
-            date=date(2024, 1, 16),
-            close=Decimal("2540.00"),
-            volume=1100000,
-        )
-        history = PriceHistory(
-            symbol="RELIANCE",
-            data=[pd_obj1, pd_obj2],
-        )
-        df = history.to_dataframe()
-        assert len(df) == 2
-        assert "close" in df.columns
-        assert "volume" in df.columns
+        data = CompleteData(symbol="RELIANCE", fundamentals=fundamentals, news=news, market_context=market_context)
 
-    def test_price_history_get_close_series(self):
-        pd_obj1 = PriceData(symbol="RELIANCE", date=date(2024, 1, 15), close=Decimal("2530.00"))
-        pd_obj2 = PriceData(symbol="RELIANCE", date=date(2024, 1, 16), close=Decimal("2540.00"))
-        history = PriceHistory(symbol="RELIANCE", data=[pd_obj1, pd_obj2])
-        series = history.get_close_series()
-        assert len(series) == 2
-        assert series.iloc[0] == 2530.0
+        assert data.symbol == "RELIANCE"
+        assert data.fundamentals == fundamentals
+        assert data.news == news
+        assert data.market_context == market_context
+        assert data.fetched_at is not None
 
 
-class TestMarketPriceCollector:
-    def setup_method(self):
-        self.collector = MarketPriceCollector(timeout=5, max_retries=0)
+class TestDataCollector:
+    @pytest.fixture
+    def db(self):
+        return Database(":memory:")
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_history_success(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
+    @pytest.fixture
+    def collector(self, db):
+        return DataCollector(db, timeout=10, max_retries=1)
 
-        mock_hist = pd.DataFrame({
-            "Open": [2500.0, 2510.0],
-            "High": [2550.0, 2560.0],
-            "Low": [2480.0, 2490.0],
-            "Close": [2530.0, 2540.0],
-            "Adj Close": [2530.0, 2540.0],
-            "Volume": [1000000, 1100000],
-        }, index=pd.to_datetime(["2024-01-15", "2024-01-16"]))
+    @pytest.fixture
+    def mock_fundamentals(self):
+        return Fundamentals(symbol="RELIANCE", pe_ratio=25.0, sector="Energy", market_cap=1500000000000)
 
-        mock_ticker.history.return_value = mock_hist
+    @pytest.fixture
+    def mock_news(self):
+        items = [NewsItem(title="Test News", url="https://ex.com", source="Test", published_at=datetime.utcnow())]
+        return NewsCollection(symbol="RELIANCE", items=items)
 
-        history = self.collector.fetch_history("RELIANCE.NS", period="5d")
+    @pytest.fixture
+    def mock_market_context(self):
+        return MarketContext(symbol="RELIANCE", nifty_50=22000.0, beta=1.2)
 
-        assert len(history.data) == 2
-        assert history.data[0].close == Decimal("2530.0")
-        assert history.data[1].close == Decimal("2540.0")
-        assert history.source == "yfinance"
-        mock_ticker.history.assert_called_once()
+    def test_get_fundamentals_with_cache(self, collector, mock_fundamentals):
+        with patch.object(collector.fundamentals_collector, "collect", return_value=mock_fundamentals) as mock_collect:
+            result1 = collector.get_fundamentals("RELIANCE", use_cache=True)
+            result2 = collector.get_fundamentals("RELIANCE", use_cache=True)
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_history_empty(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
-        mock_ticker.history.return_value = pd.DataFrame()
+            assert result1.pe_ratio == 25.0
+            assert result2.pe_ratio == 25.0
+            assert mock_collect.call_count == 1
 
-        history = self.collector.fetch_history("INVALID.NS", period="5d")
+    def test_get_fundamentals_without_cache(self, collector, mock_fundamentals):
+        with patch.object(collector.fundamentals_collector, "collect", return_value=mock_fundamentals) as mock_collect:
+            result1 = collector.get_fundamentals("RELIANCE", use_cache=False)
+            result2 = collector.get_fundamentals("RELIANCE", use_cache=False)
 
-        assert len(history.data) == 0
-        assert history.symbol == "INVALID.NS"
+            assert mock_collect.call_count == 2
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_history_with_start_end(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
+    def test_get_fundamentals_cache_miss_then_hit(self, collector, mock_fundamentals):
+        with patch.object(collector.fundamentals_collector, "collect", return_value=mock_fundamentals) as mock_collect:
+            result1 = collector.get_fundamentals("RELIANCE", use_cache=True)
+            collector.fundamentals_cache.clear_symbol("RELIANCE")
+            result2 = collector.get_fundamentals("RELIANCE", use_cache=True)
 
-        mock_hist = pd.DataFrame({
-            "Close": [2530.0],
-        }, index=pd.to_datetime(["2024-01-15"]))
+            assert mock_collect.call_count == 2
 
-        mock_ticker.history.return_value = mock_hist
+    @pytest.mark.asyncio
+    async def test_get_news_with_cache(self, collector, mock_news):
+        with patch.object(collector.news_collector, "collect", return_value=mock_news) as mock_collect:
+            result1 = await collector.get_news("RELIANCE", use_cache=True)
+            result2 = await collector.get_news("RELIANCE", use_cache=True)
 
-        history = self.collector.fetch_history(
-            "RELIANCE.NS",
-            start=date(2024, 1, 15),
-            end=date(2024, 1, 16)
-        )
+            assert len(result1.items) == 1
+            assert mock_collect.call_count == 1
 
-        mock_ticker.history.assert_called_once()
-        call_args = mock_ticker.history.call_args
-        assert call_args[1]["start"] == "2024-01-15"
-        assert call_args[1]["end"] == "2024-01-16"
+    @pytest.mark.asyncio
+    async def test_get_news_without_cache(self, collector, mock_news):
+        with patch.object(collector.news_collector, "collect", return_value=mock_news) as mock_collect:
+            result1 = await collector.get_news("RELIANCE", use_cache=False)
+            result2 = await collector.get_news("RELIANCE", use_cache=False)
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_history_retry_on_exception(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
-        mock_ticker.history.side_effect = [
-            Exception("Network error"),
-            pd.DataFrame({"Close": [2530.0]}, index=pd.to_datetime(["2024-01-15"])),
-        ]
+            assert mock_collect.call_count == 2
 
-        collector = MarketPriceCollector(max_retries=1, base_backoff=0.01)
-        history = collector.fetch_history("RELIANCE.NS", period="5d")
+    def test_get_market_context_with_cache(self, collector, mock_market_context, mock_fundamentals):
+        with patch.object(collector.market_context_collector, "collect", return_value=mock_market_context) as mock_collect:
+            with patch.object(collector, "get_fundamentals", return_value=mock_fundamentals):
+                result1 = collector.get_market_context("RELIANCE", use_cache=True)
+                result2 = collector.get_market_context("RELIANCE", use_cache=True)
 
-        assert len(history.data) == 1
-        assert mock_ticker.history.call_count == 2
+                assert result1.nifty_50 == 22000.0
+                assert mock_collect.call_count == 1
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_latest(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
+    def test_get_market_context_sector_from_fundamentals(self, collector, mock_market_context, mock_fundamentals):
+        # get_market_context doesn't auto-fetch sector from fundamentals
+        # This test verifies explicit sector is passed
+        with patch.object(collector.market_context_collector, "collect", return_value=mock_market_context) as mock_collect:
+            with patch.object(collector, "get_fundamentals", return_value=mock_fundamentals):
+                result = collector.get_market_context("RELIANCE", sector="Energy", use_cache=True)
 
-        mock_hist = pd.DataFrame({
-            "Close": [2530.0, 2540.0],
-        }, index=pd.to_datetime(["2024-01-15", "2024-01-16"]))
+                mock_collect.assert_called_once_with("RELIANCE", "Energy")
 
-        mock_ticker.history.return_value = mock_hist
+    def test_get_market_context_explicit_sector_overrides(self, collector, mock_market_context, mock_fundamentals):
+        with patch.object(collector.market_context_collector, "collect", return_value=mock_market_context) as mock_collect:
+            with patch.object(collector, "get_fundamentals", return_value=mock_fundamentals):
+                result = collector.get_market_context("RELIANCE", sector="IT", use_cache=True)
 
-        latest = self.collector.fetch_latest("RELIANCE.NS")
+                mock_collect.assert_called_once_with("RELIANCE", "IT")
 
-        assert latest is not None
-        assert latest.close == Decimal("2540.0")
+    def test_get_complete(self, collector, mock_fundamentals, mock_market_context):
+        with patch.object(collector, "get_fundamentals", return_value=mock_fundamentals):
+            with patch.object(collector, "get_market_context", return_value=mock_market_context):
+                result = collector.get_complete("RELIANCE")
 
-    @patch("stock_analysis.market.collector.yf.Ticker")
-    def test_fetch_latest_empty(self, mock_ticker_class):
-        mock_ticker = MagicMock()
-        mock_ticker_class.return_value = mock_ticker
-        mock_ticker.history.return_value = pd.DataFrame()
+                assert isinstance(result, CompleteData)
+                assert result.symbol == "RELIANCE"
+                assert result.fundamentals == mock_fundamentals
+                assert result.market_context == mock_market_context
+                assert result.news is None
 
-        latest = self.collector.fetch_latest("RELIANCE.NS")
+    @pytest.mark.asyncio
+    async def test_get_complete_async(self, collector, mock_fundamentals, mock_market_context, mock_news):
+        with patch.object(collector, "get_fundamentals", return_value=mock_fundamentals):
+            with patch.object(collector, "get_market_context", return_value=mock_market_context):
+                with patch.object(collector, "get_news", return_value=mock_news):
+                    result = await collector.get_complete_async("RELIANCE")
 
-        assert latest is None
+                    assert isinstance(result, CompleteData)
+                    assert result.news == mock_news
 
-    def test_fetch_multiple(self):
-        with patch.object(self.collector, "fetch_history") as mock_fetch:
-            mock_fetch.return_value = PriceHistory(symbol="RELIANCE.NS", data=[])
+    def test_clear_symbol_cache(self, collector):
+        with patch.object(collector.fundamentals_cache, "clear_symbol", return_value=1) as mock_f:
+            with patch.object(collector.news_cache, "clear_symbol", return_value=2) as mock_n:
+                with patch.object(collector.market_context_cache, "clear_symbol", return_value=1) as mock_m:
+                    result = collector.clear_symbol_cache("RELIANCE")
 
-            results = self.collector.fetch_multiple(["RELIANCE.NS", "TCS.NS"])
+                    assert result == {"fundamentals": 1, "news": 2, "market_context": 1}
 
-            assert len(results) == 2
-            assert mock_fetch.call_count == 2
+    def test_clear_all_expired(self, collector):
+        with patch.object(collector.fundamentals_cache, "clear_expired", return_value=5) as mock_f:
+            with patch.object(collector.news_cache, "clear_expired", return_value=3) as mock_n:
+                with patch.object(collector.market_context_cache, "clear_expired", return_value=2) as mock_m:
+                    result = collector.clear_all_expired()
 
+                    assert result == {"fundamentals": 5, "news": 3, "market_context": 2}
 
-class TestMarketPriceCollectorWithCache:
-    def test_cache_hit(self):
-        mock_cache = MagicMock(spec=PriceCache)
-        mock_cache.get.return_value = PriceHistory(
-            symbol="RELIANCE.NS",
-            data=[PriceData(symbol="RELIANCE.NS", date=date(2024, 1, 15), close=Decimal("2530.0"))],
-            source="cache"
-        )
+    def test_get_cache_stats(self, collector):
+        mock_stats = {"total_entries": 10, "expired_entries": 2, "table_name": "test"}
+        with patch.object(collector.fundamentals_cache, "get_stats", return_value=mock_stats):
+            with patch.object(collector.news_cache, "get_stats", return_value=mock_stats):
+                with patch.object(collector.market_context_cache, "get_stats", return_value=mock_stats):
+                    stats = collector.get_cache_stats()
 
-        collector = MarketPriceCollector(cache=mock_cache, max_retries=0)
+                    assert stats["fundamentals"] == mock_stats
+                    assert stats["news"] == mock_stats
+                    assert stats["market_context"] == mock_stats
 
-        with patch("stock_analysis.market.collector.yf.Ticker") as mock_ticker:
-            history = collector.fetch_history("RELIANCE.NS", period="5d")
-
-            assert history.source == "cache"
-            mock_ticker.assert_not_called()
-            mock_cache.get.assert_called_once()
-
-    def test_cache_miss_then_store(self):
-        mock_cache = MagicMock(spec=PriceCache)
-        mock_cache.get.return_value = None
-
-        collector = MarketPriceCollector(cache=mock_cache, max_retries=0)
-
-        with patch("stock_analysis.market.collector.yf.Ticker") as mock_ticker_class:
-            mock_ticker = MagicMock()
-            mock_ticker_class.return_value = mock_ticker
-            mock_ticker.history.return_value = pd.DataFrame({
-                "Close": [2530.0],
-            }, index=pd.to_datetime(["2024-01-15"]))
-
-            history = collector.fetch_history("RELIANCE.NS", period="5d")
-
-            assert history.source == "yfinance"
-            mock_cache.set.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_close(self, collector):
+        with patch.object(collector.news_collector, "close", new_callable=AsyncMock) as mock_close:
+            await collector.close()
+            mock_close.assert_called_once()

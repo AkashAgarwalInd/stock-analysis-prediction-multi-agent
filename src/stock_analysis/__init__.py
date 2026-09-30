@@ -5,6 +5,18 @@ from .schemas import *
 from .llm.models import LLMModel, LLMResponse
 from .market import SymbolResolver, MarketPriceCollector, TradingCalendar, PriceCache
 from .indicators import TechnicalIndicators, compute_all_indicators
+from .data import (
+    Fundamentals,
+    FundamentalsCollector,
+    NewsItem,
+    NewsCollection,
+    NewsCollector,
+    MarketContext,
+    MarketContextCollector,
+    DataCache,
+    CompleteData,
+    DataCollector,
+)
 
 __version__ = "0.1.0"
 
@@ -26,4 +38,14 @@ __all__ = [
     "PriceCache",
     "TechnicalIndicators",
     "compute_all_indicators",
+    "Fundamentals",
+    "FundamentalsCollector",
+    "NewsItem",
+    "NewsCollection",
+    "NewsCollector",
+    "MarketContext",
+    "MarketContextCollector",
+    "DataCache",
+    "CompleteData",
+    "DataCollector",
 ]

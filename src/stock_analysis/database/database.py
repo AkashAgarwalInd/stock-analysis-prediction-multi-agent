@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Union
 
 from stock_analysis.config import get_settings
 from stock_analysis.logging import get_logger
@@ -10,14 +10,16 @@ logger = get_logger(__name__)
 
 
 class Database:
-    def __init__(self, path: Path, echo: bool = False):
-        self.path = path
+    def __init__(self, path: Union[str, Path], echo: bool = False):
+        self.path = Path(path) if isinstance(path, str) else path
         self.echo = echo
         self._conn: sqlite3.Connection | None = None
+        self._is_memory = str(self.path) == ":memory:"
 
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self._is_memory:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
                 self.path,
                 check_same_thread=False,

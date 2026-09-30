@@ -17,6 +17,14 @@ from .data import (
     CompleteData,
     DataCollector,
 )
+from .quant import (
+    QuantBaseline,
+    QuantForecaster,
+    EWMAVolatility,
+    VolatilityModel,
+    HistoricalReturns,
+    compute_momentum_drift,
+)
 
 __version__ = "0.1.0"
 
@@ -48,4 +56,10 @@ __all__ = [
     "DataCache",
     "CompleteData",
     "DataCollector",
+    "QuantBaseline",
+    "QuantForecaster",
+    "EWMAVolatility",
+    "VolatilityModel",
+    "HistoricalReturns",
+    "compute_momentum_drift",
 ]

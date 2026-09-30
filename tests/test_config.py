@@ -23,7 +23,7 @@ class TestSettings:
         assert settings.gemini_api_key is None
         assert settings.gemini_model_primary == "gemini-3.5-flash-lite"
         assert settings.gemini_model_critic == "gemini-3.5-flash-lite"
-        assert settings.gemini_model_fallback == "gemini-3.5-flash-lite"
+        assert settings.gemini_model_fallback == "gemini-3.5-flash-8b-lite"
         assert settings.gemini_temperature == 0.1
         assert settings.gemini_max_tokens == 8192
         assert settings.forecast_horizon_days == 5

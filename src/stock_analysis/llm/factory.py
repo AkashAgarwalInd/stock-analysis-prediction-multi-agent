@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Any, TypeVar, Generic
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -43,7 +43,7 @@ class LLMFactory:
             self._settings = None
 
         if not self._settings or not self._settings.gemini_api_key:
-            logger.warning("gemini_api_key_not_set", message="Gemini API key not configured")
+            logger.warning("gemini_api_key_not_set")
             self._initialized = True
             return
 
@@ -62,7 +62,7 @@ class LLMFactory:
         )
 
         self._initialized = True
-        logger.info("llm_factory_initialized", models=list(self._models.keys()))
+        logger.info("llm_factory_initialized", extra={"models": list(self._models.keys())})
 
     def get_model(self, role: LLMModel) -> Any:
         if not self._initialized:
@@ -116,7 +116,7 @@ class LLMFactory:
             except Exception:
                 config_kwargs["max_output_tokens"] = 8192
 
-        logger.debug("llm_generate_structured", role=role.value)
+        logger.debug("llm_generate_structured", extra={"role": role.value})
 
         if GenerateContentConfig is not None:
             response = model.generate_content(prompt, generation_config=GenerateContentConfig(**config_kwargs))
@@ -138,7 +138,7 @@ class LLMFactory:
         try:
             model = self.get_model(role)
         except RuntimeError:
-            raise LLMResponse(content="", model="", usage={})
+            return LLMResponse(content="", model="", usage={})
 
         try:
             from google.generativeai.types import GenerateContentConfig
@@ -167,7 +167,7 @@ class LLMFactory:
             except Exception:
                 config_kwargs["max_output_tokens"] = 8192
 
-        logger.debug("llm_generate_text", role=role.value)
+        logger.debug("llm_generate_text", extra={"role": role.value})
 
         if GenerateContentConfig is not None:
             response = model.generate_content(prompt, generation_config=GenerateContentConfig(**config_kwargs))
@@ -186,18 +186,18 @@ class LLMFactory:
         )
 
 
-# Public API
-get_llm_factory = None  # will be set when module is imported via get_llm_factory()
-get_llm = None  # will be set when module is imported via get_llm()
+_factory_instance: LLMFactory | None = None
 
 
-def get_llm_factory_func() -> LLMFactory:
+def get_llm_factory() -> LLMFactory:
     """Get or create the LLM factory singleton."""
-    from stock_analysis.llm import get_llm_factory as _get_llm_factory
-    return _get_llm_factory()
+    global _factory_instance
+    if _factory_instance is None:
+        _factory_instance = LLMFactory()
+    return _factory_instance
 
 
-def get_llm_func(role: LLMModel) -> Any:
+def get_llm(role: LLMModel) -> Any:
     """Get an LLM model by role."""
-    factory = get_llm_factory_func()
+    factory = get_llm_factory()
     return factory.get_model(role)

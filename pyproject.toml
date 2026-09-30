@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13.7.0",
     "alembic>=1.13.0",
     "sqlite-utils>=3.37.0",
+    "feedparser>=6.0.14",
 ]
 
 [project.optional-dependencies]

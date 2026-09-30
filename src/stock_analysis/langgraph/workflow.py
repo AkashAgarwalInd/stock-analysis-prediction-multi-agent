@@ -5,7 +5,20 @@ from typing import Literal, Optional
 from langgraph.graph import END, StateGraph
 
 from stock_analysis.schemas.graph_state import GraphState
-from stock_analysis.schemas.analyst_reports import AnalystReport, DecisionResult, DecisionType, MarketRegime, RiskCategory, AnalystStance, AnalystType
+from stock_analysis.schemas.analyst_reports import (
+    AnalystReport,
+    DecisionResult,
+    DecisionType,
+    MarketRegime,
+    RiskCategory,
+    AnalystStance,
+    AnalystType,
+)
+from stock_analysis.guardrails import (
+    run_preflight_guardrails,
+    GuardrailViolationType,
+    GuardrailResult,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +39,45 @@ def _merge_reports(
     reports = dict(existing)
     reports[new_report["analyst"]] = new_report
     return reports
+
+
+# ---------------------------------------------------------------------------
+# Guardrail node
+# ---------------------------------------------------------------------------
+
+
+def make_guardrail_node() -> callable:
+    """Pre-flight guardrail node that validates state before decision engine."""
+
+    def guardrail_node(state: GraphState) -> dict:
+        result = run_preflight_guardrails(state)
+
+        if not result.passed:
+            # Build error summary
+            error_messages = [v.message for v in result.violations]
+            warning_messages = [w.message for w in result.warnings]
+
+            # Return degraded decision indicating guardrail failure
+            return {
+                "decision": DecisionResult(
+                    decision_type=DecisionType.MARKET_REGIME,
+                    result=MarketRegime.MIXED.value,
+                    confidence=0.0,
+                    rationale=f"Guardrail violations: {'; '.join(error_messages)}",
+                    model="guardrails",
+                    model_version="0.1.0",
+                ).model_dump(),
+                "guardrail_violations": [v.__dict__ for v in result.violations],
+                "guardrail_warnings": [w.__dict__ for w in result.warnings],
+            }
+
+        # Pass - return warnings if any
+        return {
+            "guardrail_violations": [],
+            "guardrail_warnings": [w.__dict__ for w in result.warnings],
+        }
+
+    return guardrail_node
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +399,9 @@ def build_workflow(
     # -- Decision engine node --
     workflow.add_node("decision_engine", make_decision_engine_node())
 
+    # -- Guardrail node --
+    workflow.add_node("guardrails", make_guardrail_node())
+
     # -- Quant baseline node (Phase 4 integration) --
     from stock_analysis.quant.forecast import QuantForecaster, QuantBaseline
 
@@ -396,11 +451,14 @@ def build_workflow(
     workflow.add_edge("mark_collectors", "context_analyst")
 
     # All analysts run in parallel; results merged by reducer
-    # After all analysts, proceed to decision engine
-    workflow.add_edge("technical_analyst", "decision_engine")
-    workflow.add_edge("fundamental_analyst", "decision_engine")
-    workflow.add_edge("sentiment_analyst", "decision_engine")
-    workflow.add_edge("context_analyst", "decision_engine")
+    # After all analysts, proceed to guardrails
+    workflow.add_edge("technical_analyst", "guardrails")
+    workflow.add_edge("fundamental_analyst", "guardrails")
+    workflow.add_edge("sentiment_analyst", "guardrails")
+    workflow.add_edge("context_analyst", "guardrails")
+
+    # Guardrails to decision engine
+    workflow.add_edge("guardrails", "decision_engine")
 
     workflow.add_edge("decision_engine", "quant_baseline")
     workflow.add_edge("quant_baseline", "join")

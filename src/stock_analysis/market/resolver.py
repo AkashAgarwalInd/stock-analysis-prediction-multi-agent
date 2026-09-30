@@ -2,6 +2,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+import yfinance as yf
+
 from stock_analysis.logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,9 +71,11 @@ class SymbolResolver:
         "M&M": "Mahindra & Mahindra Ltd",
     }
 
-    def __init__(self):
+    def __init__(self, enable_yfinance_validation: bool = True):
         self._symbol_cache: dict[str, ResolvedSymbol] = {}
         self._name_to_symbol: dict[str, str] = {}
+        self._validation_cache: dict[str, bool] = {}
+        self._enable_yfinance_validation = enable_yfinance_validation
         self._build_name_index()
 
     def _build_name_index(self) -> None:
@@ -144,6 +148,19 @@ class SymbolResolver:
                 self._symbol_cache[input_str] = result
                 return result
 
+        if self._enable_yfinance_validation:
+            base_symbol = yfinance_symbol.replace(".NS", "").replace(".BO", "")
+            if self._validate_with_yfinance(base_symbol):
+                result = ResolvedSymbol(
+                    symbol=yfinance_symbol,
+                    name="",
+                    exchange="NSE",
+                    confidence=0.7,
+                    matched_by="yfinance_validated"
+                )
+                self._symbol_cache[input_str] = result
+                return result
+
         result = ResolvedSymbol(
             symbol=yfinance_symbol,
             name="",
@@ -153,6 +170,24 @@ class SymbolResolver:
         )
         self._symbol_cache[input_str] = result
         return result
+
+    def _validate_with_yfinance(self, symbol: str) -> bool:
+        if symbol in self._validation_cache:
+            return self._validation_cache[symbol]
+
+        # Try with .NS suffix for NSE
+        test_symbol = symbol if symbol.endswith(".NS") else symbol + ".NS"
+
+        try:
+            ticker = yf.Ticker(test_symbol)
+            info = ticker.info
+            is_valid = bool(info.get("symbol") or info.get("shortName") or info.get("longName"))
+            self._validation_cache[symbol] = is_valid
+            return is_valid
+        except Exception as e:
+            logger.debug("yfinance_validation_failed", symbol=symbol, error=str(e))
+            self._validation_cache[symbol] = False
+            return False
 
     def _fuzzy_match(self, normalized: str) -> Optional[str]:
         for name, symbol in self._name_to_symbol.items():

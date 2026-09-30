@@ -101,8 +101,6 @@ class PriceCache:
 
     def set(self, cache_key: str, history: PriceHistory, ttl_hours: int = 24) -> None:
         data_json = json.dumps(self._serialize_history(history))
-        expires_at = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        expires_at = expires_at.replace(day=expires_at.day + 1) if ttl_hours >= 24 else datetime.utcnow()
 
         from datetime import timedelta
         expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)

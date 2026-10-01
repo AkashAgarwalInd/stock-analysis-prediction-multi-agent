@@ -1,44 +1,78 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+import json
+from dataclasses import asdict
+from datetime import date
+from pathlib import Path
+from typing import Callable, Literal, Optional
 
+import numpy as np
 from langgraph.graph import END, StateGraph
+from pydantic import ValidationError
 
-from stock_analysis.schemas.graph_state import GraphState
+from stock_analysis.config.settings import get_settings
+from stock_analysis.guardrails import run_preflight_guardrails
+from stock_analysis.llm.factory import LLMModel, get_llm_factory
+from stock_analysis.logging import get_logger
+from stock_analysis.quant import QuantForecaster
 from stock_analysis.schemas.analyst_reports import (
+    AdjustmentGateDecision,
     AnalystReport,
+    AnalystStance,
+    AnalystType,
     DecisionResult,
     DecisionType,
     MarketRegime,
-    RiskCategory,
-    AnalystStance,
-    AnalystType,
+    RulesDecisionEngine,
 )
-from stock_analysis.guardrails import (
-    run_preflight_guardrails,
-    GuardrailViolationType,
-    GuardrailResult,
+from stock_analysis.schemas.forecast_pipeline import (
+    CriticCheckType,
+    CriticFinding,
+    CriticResult,
+    FinalForecast,
+    PredictorResult,
 )
+from stock_analysis.schemas.graph_state import GraphState
+
+logger = get_logger(__name__)
+
+# Tolerances used by the deterministic critic
+_PROB_SUM_TOLERANCE = 0.001
+_PROB_SHIFT_EPSILON = 1e-9
+_OVERCONFIDENCE_THRESHOLD = 0.9
+
+_ANALYST_REPORT_FIELDS = (
+    "technical_report",
+    "fundamental_report",
+    "sentiment_report",
+    "context_report",
+)
+_PROB_FIELDS = ("prob_up", "prob_flat", "prob_down")
 
 
-# ---------------------------------------------------------------------------
-# Reducers – merge analyst reports from parallel execution
-# ---------------------------------------------------------------------------
+def _max_prob_shift() -> float:
+    """Maximum allowed probability shift from the quant baseline (Plan.md §9)."""
+    return get_settings().predictor_max_prob_shift
 
-def _merge_reports(
-    existing: Optional[dict],
-    new_report: dict,
-) -> dict:
-    """Merge a new analyst report into existing reports dict.
 
-    Each report is keyed by analyst type.  If both exist, the new report
-    overwrites (parallel analysts produce one report each).
-    """
-    if existing is None:
-        return {new_report["analyst"]: new_report}
-    reports = dict(existing)
-    reports[new_report["analyst"]] = new_report
+def _max_revisions() -> int:
+    """Maximum number of predictor revisions (Plan.md §10)."""
+    return get_settings().max_revisions
+
+
+def _collect_reports(state: GraphState) -> list[dict]:
+    """Return the analyst reports that are present in state."""
+    reports = []
+    for field in _ANALYST_REPORT_FIELDS:
+        rpt = getattr(state, field)
+        if rpt:
+            reports.append(rpt)
     return reports
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    """De-duplicate while preserving order."""
+    return list(dict.fromkeys(items))
 
 
 # ---------------------------------------------------------------------------
@@ -46,16 +80,14 @@ def _merge_reports(
 # ---------------------------------------------------------------------------
 
 
-def make_guardrail_node() -> callable:
+def make_guardrail_node() -> Callable[[GraphState], dict]:
     """Pre-flight guardrail node that validates state before decision engine."""
 
     def guardrail_node(state: GraphState) -> dict:
         result = run_preflight_guardrails(state)
 
         if not result.passed:
-            # Build error summary
             error_messages = [v.message for v in result.violations]
-            warning_messages = [w.message for w in result.warnings]
 
             # Return degraded decision indicating guardrail failure
             return {
@@ -66,12 +98,11 @@ def make_guardrail_node() -> callable:
                     rationale=f"Guardrail violations: {'; '.join(error_messages)}",
                     model="guardrails",
                     model_version="0.1.0",
-                ).model_dump(),
+                ).model_dump(mode="json"),
                 "guardrail_violations": [v.__dict__ for v in result.violations],
                 "guardrail_warnings": [w.__dict__ for w in result.warnings],
             }
 
-        # Pass - return warnings if any
         return {
             "guardrail_violations": [],
             "guardrail_warnings": [w.__dict__ for w in result.warnings],
@@ -89,105 +120,64 @@ def make_analyst_node(
     name: AnalystType,
     prompt_path: str,
     llm_factory,
-) -> callable:
+) -> Callable[[GraphState], dict]:
     """Factory that creates an analyst node function for the LangGraph.
 
     The node:
     1. Reads structured collector summaries from GraphState
     2. Formats the prompt with available data
     3. Calls LLM for structured output via the factory
-    4. Returns an AnalystReport (Pydantic-validated)
-    5. Merges into GraphState via reducer
+    4. Returns a single ``<analyst>_report`` dict (Pydantic-validated)
     """
 
-    def analyst_node(state: GraphState, llm_factory=llm_factory) -> dict:
-        # Gather compact summaries; never large datasets
-        tech_summary = state.technical_indicators_summary or {}
-        fundamentals_summary = state.fundamentals_summary or {}
-        news_summary = state.news_summary or {}
-        market_summary = state.market_context_summary or {}
-
-        # Select prompt data based on analyst type
+    def analyst_node(state: GraphState) -> dict:
+        # Compact summaries only; never large datasets
         if name == AnalystType.TECHNICAL:
             prompt_data = {
                 "symbol": state.symbol,
-                "indicators": tech_summary,
+                "indicators": state.technical_indicators_summary or {},
             }
-            prompt_text = prompt_data.get(
-                "prompt",
-                open(prompt_path).read()
-                if __import__("os").path.exists(prompt_path)
-                else "",
-            )
         elif name == AnalystType.FUNDAMENTAL:
             prompt_data = {
                 "symbol": state.symbol,
-                "fundamentals": fundamentals_summary,
+                "fundamentals": state.fundamentals_summary or {},
             }
         elif name == AnalystType.SENTIMENT:
-            prompt_data = {
-                "symbol": state.symbol,
-                "news": news_summary,
-            }
-        elif name == AnalystType.CONTEXT:
-            prompt_data = {
-                "symbol": state.symbol,
-                "market_context": market_summary,
-            }
+            prompt_data = {"symbol": state.symbol, "news": state.news_summary or {}}
         else:
-            prompt_text = ""
+            prompt_data = {
+                "symbol": state.symbol,
+                "market_context": state.market_context_summary or {},
+            }
 
-        # Call LLM for structured output
+        path = Path(prompt_path)
+        instructions = path.read_text() if path.exists() else ""
+        prompt = f"{instructions}\n\nINPUT DATA:\n{json.dumps(prompt_data, default=str)}"
+
         try:
-            from stock_analysis.llm.factory import get_llm_factory
-
             factory = get_llm_factory() if llm_factory is None else llm_factory
             response = factory.generate_structured(
-                role="primary",
-                prompt=prompt_text,
+                role=LLMModel.PRIMARY,
+                prompt=prompt,
                 response_schema=AnalystReport,
                 temperature=0.1,
                 max_tokens=2048,
             )
-            # Normalize to dict for state merging
-            report_dict = response.model_dump()
+            report_dict = response.model_dump(mode="json")
         except Exception as err:
             # Graceful degradation – return a clearly marked degraded result
+            logger.warning("analyst_failed", analyst=name.value, error=str(err))
             report_dict = {
                 "analyst": name.value,
                 "stance": AnalystStance.NEUTRAL.value,
                 "confidence": 0.0,
-                "key_points": [f"Analysis failed: {err}"],
+                "key_points": [f"Analysis failed: {err}"[:200]],
                 "evidence": [],
                 "risks": ["LLM call failed"],
                 "data_gaps": ["LLM unavailable"],
             }
 
-        # Merge using reducer
-        merged_reports = _merge_reports(state.technical_report, report_dict)  # type: ignore
-
-        return {
-            "technical_report" if name == AnalystType.TECHNICAL else None: (
-                merged_reports
-                if name == AnalystType.TECHNICAL
-                else state.technical_report
-            ),
-            "fundamental_report" if name == AnalystType.FUNDAMENTAL else None: (
-                merged_reports
-                if name == AnalystType.FUNDAMENTAL
-                else state.fundamental_report
-            ),
-            "sentiment_report" if name == AnalystType.SENTIMENT else None: (
-                merged_reports
-                if name == AnalystType.SENTIMENT
-                else state.sentiment_report
-            ),
-            "context_report" if name == AnalystType.CONTEXT else None: (
-                merged_reports
-                if name == AnalystType.CONTEXT
-                else state.context_report
-            ),
-        }
+        return {f"{name.value}_report": report_dict}
 
     return analyst_node
 
@@ -197,101 +187,406 @@ def make_analyst_node(
 # ---------------------------------------------------------------------------
 
 
-def make_decision_engine_node() -> callable:
-    """Decision Engine node that classifies bounded decisions from analyst reports.
+def make_decision_engine_node() -> Callable[[GraphState], dict]:
+    """Decision Engine node that classifies the market regime from analyst reports.
 
-    Supports: market_regime, risk_category, analyst_stance
-    Uses deterministic RulesDecisionEngine when DECISION_ENGINE=rules.
+    Delegates to the deterministic ``RulesDecisionEngine``. If the guardrails
+    already produced a degraded decision, it is preserved.
     """
 
+    engine = RulesDecisionEngine()
+
     def decide_node(state: GraphState) -> dict:
-        # Gather analyst reports
-        reports = {
-            "technical": state.technical_report,
-            "fundamental": state.fundamental_report,
-            "sentiment": state.sentiment_report,
-            "context": state.context_report,
-        }
+        if state.guardrail_violations and state.decision is not None:
+            return {"decision": state.decision.model_dump(mode="json")}
 
-        # Simple deterministic rules based on reported stances and confidences
-        stances: dict[AnalystStance, float] = {}
-        all_data_gaps: list[str] = []
-
-        for rpt_dict in reports.values():
-            if rpt_dict is None:
-                continue
-            try:
-                rpt = AnalystReport(**rpt_dict)
-                stances[AnalystStance(rpt.stance)] = rpt.confidence
-                all_data_gaps.extend(rpt.data_gaps)
-            except Exception:
-                continue
-
-        # Classify market regime based on stances and confidence
-        if not stances:
-            result = DecisionResult(
-                decision_type=DecisionType.MARKET_REGIME,
-                result=MarketRegime.SIDWAYS.value,
-                confidence=0.5,
-                rationale="Insufficient analyst reports to determine regime",
-                model="rules",
-                model_version="0.1.0",
-            )
-        else:
-            # Majority stance determines regime
-            bullish_count = sum(1 for s in stances if s in (
-                AnalystStance.BULLISH, AnalystStance.STRONG_BULLISH))
-            bearish_count = sum(1 for s in stances if s in (
-                AnalystStance.BEARISH, AnalystStance.STRONG_BEARISH))
-            neutral_count = sum(1 for s in stances if s == AnalystStance.NEUTRAL)
-
-            if bullish_count > bearish_count and bullish_count > neutral_count:
-                regime = MarketRegime.TRENDING_UP
-                rationale = f"Bullish consensus: {bullish_count} bullish vs {bearish_count} bearish"
-            elif bearish_count > bullish_count and bearish_count > neutral_count:
-                regime = MarketRegime.TRENDING_DOWN
-                rationale = f"Bearish consensus: {bearish_count} bearish vs {bullish_count} bullish"
-            elif high_vol := any(
-                s in (AnalystStance.STRONG_BULLISH, AnalystStance.STRONG_BEARISH)
-                for s in stances
-            ):
-                regime = MarketRegime.HIGH_VOLATILITY
-                rationale = "High confidence extreme stance detected"
-            else:
-                regime = MarketRegime.SIDWAYS
-                rationale = "Mixed/neutral consensus"
-
-        # Risk category based on data gaps and confidence spread
-        max_gap_risk = (
-            "high" if any("critical" in g.lower() for g in all_data_gaps) else "medium"
+        result = engine.decide(
+            DecisionType.MARKET_REGIME,
+            {"analyst_reports": _collect_reports(state)},
         )
-        risk_result = DecisionResult(
-            decision_type=DecisionType.RISK_CATEGORY,
-            result=max_gap_risk,
-            confidence=0.6,
-            rationale=f"Data gaps risk: {max_gap_risk}; analyst stances: {list(stances.keys())}",
-            model="rules",
-            model_version="0.1.0",
-        )
-
-        # Analyst stance aggregation
-        primary_stance = max(stances, key=stances.get) if stances else AnalystStance.NEUTRAL
-        stance_result = DecisionResult(
-            decision_type=DecisionType.ANALYST_STANCE,
-            result=primary_stance.value,
-            confidence=stances.get(primary_stance, 0.0),
-            rationale=f"Primary stance: {primary_stance.value} with confidence {stances.get(primary_stance, 0):.2f}",
-            model="rules",
-            model_version="0.1.0",
-        )
-
-        # Merge decisions into state
-        return {
-            "decision": result.model_dump() if "result" in dir() else result.model_dump(),
-            # This is simplified; in production would merge all three
-        }
+        return {"decision": result.model_dump(mode="json")}
 
     return decide_node
+
+
+# ---------------------------------------------------------------------------
+# Quant baseline node
+# ---------------------------------------------------------------------------
+
+
+def quant_baseline_node(state: GraphState) -> dict:
+    """Generate the Phase 4 quant baseline from real price history."""
+    from stock_analysis.market.collector import get_price_collector
+
+    def _failed(reason: str) -> dict:
+        return {"quant_baseline": {"error": reason, "source": "quant_baseline_node_failed"}}
+
+    try:
+        price_history = get_price_collector().fetch_history(
+            state.resolved_symbol, period="2y", interval="1d"
+        )
+    except Exception as err:
+        logger.warning("quant_price_fetch_failed", symbol=state.resolved_symbol, error=str(err))
+        return _failed(f"Price fetch failed for {state.resolved_symbol}: {err}")
+
+    close_prices = np.array(
+        [float(d.close) for d in (price_history.data or []) if d.close is not None]
+    )
+    if len(close_prices) < 20:
+        return _failed(f"Insufficient valid close prices for {state.resolved_symbol}")
+
+    forecaster = QuantForecaster(seed=42, n_paths=10000, horizon=5)
+    try:
+        baseline = forecaster.forecast(close_prices)
+    except ValueError as err:
+        return _failed(str(err))
+    return {"quant_baseline": asdict(baseline)}
+
+
+# ---------------------------------------------------------------------------
+# Adjustment gate node
+# ---------------------------------------------------------------------------
+
+
+def adjustment_gate_node(state: GraphState) -> dict:
+    """Decide whether the predictor may adjust the quant baseline."""
+    if state.guardrail_violations:
+        result = DecisionResult(
+            decision_type=DecisionType.FORECAST_ADJUSTMENT_GATE,
+            result=AdjustmentGateDecision.NO_ADJUSTMENT.value,
+            confidence=1.0,
+            rationale="Guardrail violations block adjustment",
+            model="guardrails",
+        )
+    else:
+        result = RulesDecisionEngine().decide(
+            DecisionType.FORECAST_ADJUSTMENT_GATE,
+            {
+                "analyst_reports": _collect_reports(state),
+                "quant_baseline": state.quant_baseline,
+            },
+        )
+    return {"adjustment_gate_decision": result.model_dump(mode="json")}
+
+
+# ---------------------------------------------------------------------------
+# Predictor node
+# ---------------------------------------------------------------------------
+
+
+def build_predictor_prompt(
+    quant_baseline: dict,
+    analyst_reports: list[dict],
+    evidence: list[str],
+    key_points: list[str],
+    risks: list[str],
+    revision_guidance: Optional[str] = None,
+) -> str:
+    """Build the constrained predictor prompt.
+
+    Numbers come from the quant baseline; the LLM may only propose bounded,
+    evidence-backed adjustments to them.
+    """
+    max_shift = _max_prob_shift()
+    lines = [
+        "You are a forecast predictor for an Indian NSE stock (educational use only).",
+        "Start from the QUANT BASELINE and apply ONLY small, evidence-backed adjustments.",
+        "Do not invent facts, override deterministic data, or narrow uncertainty dramatically.",
+        "",
+        "QUANT BASELINE:",
+        json.dumps(quant_baseline, indent=2, default=str),
+        "",
+    ]
+
+    for rpt in analyst_reports:
+        lines.append(
+            f"{str(rpt.get('analyst', 'unknown')).upper()} ANALYST "
+            f"(stance: {str(rpt.get('stance', 'unknown')).upper()}, "
+            f"confidence: {rpt.get('confidence')})"
+        )
+        for label, key in (("Key points", "key_points"), ("Evidence", "evidence"), ("Risks", "risks")):
+            for item in rpt.get(key, []):
+                lines.append(f"  {label}: {item}")
+        for gap in rpt.get("data_gaps", []):
+            desc = gap.get("description") if isinstance(gap, dict) else gap
+            lines.append(f"  Data gap: {desc}")
+        lines.append("")
+
+    if evidence:
+        lines.append("EVIDENCE INDEX (cite these in evidence_refs):")
+        lines.extend(f"  - {e}" for e in evidence)
+        lines.append("")
+    if key_points:
+        lines.append("KEY POINTS:")
+        lines.extend(f"  - {k}" for k in key_points)
+        lines.append("")
+    if risks:
+        lines.append("RISKS:")
+        lines.extend(f"  - {r}" for r in risks)
+        lines.append("")
+
+    lines += [
+        "CONSTRAINTS:",
+        f"- MAX_PROB_SHIFT = {max_shift} (per-probability change vs the baseline)",
+        "- prob_up + prob_flat + prob_down MUST equal 1.0",
+        "- P10 < P50 < P90",
+        "- Every adjustment needs a reason and evidence_refs",
+        "- If no adjustment is justified, return the baseline with adjustment_applied=false",
+        "",
+        "Return JSON matching the PredictorResult schema.",
+    ]
+
+    if revision_guidance:
+        lines += ["", "REVISION REQUIRED - fix these critic findings:", revision_guidance]
+
+    return "\n".join(lines)
+
+
+def _quant_as_predictor_result(quant: dict, reasoning: str) -> dict:
+    """Express the quant baseline as an unadjusted ``PredictorResult`` dict."""
+    return PredictorResult(
+        prob_up=quant["prob_up"],
+        prob_flat=quant["prob_flat"],
+        prob_down=quant["prob_down"],
+        expected_return_pct=quant["expected_return_pct"],
+        p10_price=quant["p10_price"],
+        p50_price=quant["p50_price"],
+        p90_price=quant["p90_price"],
+        weekly_vol_pct=quant["weekly_vol_pct"],
+        adjustment_applied=False,
+        adjustments=[],
+        reasoning=reasoning[:2000],
+        evidence=[],
+        risks=[],
+        quant_baseline_ref=quant,
+    ).model_dump(mode="json")
+
+
+def make_predictor_node(llm_factory=None) -> Callable[[GraphState], dict]:
+    """Predictor node that applies bounded adjustments to the quant baseline."""
+
+    def predictor_node(state: GraphState) -> dict:
+        quant = state.quant_baseline
+        if not quant or quant.get("error"):
+            return {"predictor_result": {"error": "No valid quant baseline"}}
+
+        gate = state.adjustment_gate_decision
+        if gate is None or gate.result != AdjustmentGateDecision.ALLOW_ADJUSTMENT.value:
+            reason = gate.rationale if gate else "gate not evaluated"
+            return {
+                "predictor_result": _quant_as_predictor_result(
+                    quant, f"No adjustment allowed by gate: {reason}"
+                )
+            }
+
+        reports = _collect_reports(state)
+        critic = state.critic_result
+        guidance = critic.get("revision_guidance") if critic and not critic.get("passed") else None
+        prompt = build_predictor_prompt(
+            quant_baseline=quant,
+            analyst_reports=reports,
+            evidence=_dedupe([e for r in reports for e in r.get("evidence", [])]),
+            key_points=_dedupe([k for r in reports for k in r.get("key_points", [])]),
+            risks=_dedupe([x for r in reports for x in r.get("risks", [])]),
+            revision_guidance=guidance,
+        )
+
+        try:
+            factory = get_llm_factory() if llm_factory is None else llm_factory
+            response = factory.generate_structured(
+                role=LLMModel.PRIMARY,
+                prompt=prompt,
+                response_schema=PredictorResult,
+                temperature=0.1,
+                max_tokens=4096,
+            )
+            # Re-validate against the real baseline so the drift bound cannot be
+            # bypassed by an LLM that omits or alters quant_baseline_ref.
+            predictor_result = PredictorResult(
+                **{**response.model_dump(), "quant_baseline_ref": quant}
+            )
+        except ValidationError as err:
+            # Output violated schema bounds: surface it so the critic can drive a revision
+            logger.warning("predictor_invalid_output", error=str(err))
+            return {"predictor_result": {"error": f"Invalid predictor output: {err}"}}
+        except Exception as err:
+            # LLM unavailable: revising will not help, fall back to the baseline
+            logger.warning("predictor_llm_failed", error=str(err))
+            return {
+                "predictor_result": _quant_as_predictor_result(
+                    quant, f"LLM adjustment failed, falling back to quant baseline: {err}"
+                )
+            }
+
+        return {"predictor_result": predictor_result.model_dump(mode="json")}
+
+    return predictor_node
+
+
+# ---------------------------------------------------------------------------
+# Critic / revision / final forecast
+# ---------------------------------------------------------------------------
+
+
+def critic_node(state: GraphState) -> dict:
+    """Deterministic critic over the raw predictor output.
+
+    Works on the raw dict (not ``PredictorResult``) so that it can judge output
+    that would fail strict schema validation.
+    """
+    pred = state.predictor_result or {}
+    quant = state.quant_baseline or {}
+    findings: list[CriticFinding] = []
+
+    def add(check: CriticCheckType, message: str, severity: str = "error") -> None:
+        findings.append(
+            CriticFinding(
+                check_type=check, passed=False, message=message[:500], severity=severity
+            )
+        )
+
+    if not pred or "error" in pred:
+        add(
+            CriticCheckType.DATA_QUALITY,
+            f"Predictor produced no valid forecast: {pred.get('error', 'missing')}",
+        )
+    else:
+        probs = {f: pred.get(f) for f in _PROB_FIELDS}
+
+        valid_probs = True
+        for name, val in probs.items():
+            if not isinstance(val, (int, float)) or not 0.0 <= val <= 1.0:
+                valid_probs = False
+                add(CriticCheckType.PROBABILITY_VALIDITY, f"{name}={val} is outside [0, 1]")
+
+        if valid_probs:
+            total = sum(probs.values())
+            if abs(total - 1.0) > _PROB_SUM_TOLERANCE:
+                add(CriticCheckType.PROBABILITY_SUM, f"Probabilities sum to {total:.4f}, expected 1.0")
+
+        p10, p50, p90 = (pred.get(k) for k in ("p10_price", "p50_price", "p90_price"))
+        if not all(isinstance(p, (int, float)) for p in (p10, p50, p90)) or not p10 < p50 < p90:
+            add(CriticCheckType.PRICE_ORDERING, f"Require P10 < P50 < P90, got {p10}, {p50}, {p90}")
+
+        max_shift = _max_prob_shift()
+        for name in _PROB_FIELDS:
+            base, new = quant.get(name), probs[name]
+            if isinstance(base, (int, float)) and isinstance(new, (int, float)):
+                shift = abs(new - base)
+                if shift > max_shift + _PROB_SHIFT_EPSILON:
+                    add(
+                        CriticCheckType.EXCESSIVE_ADJUSTMENT,
+                        f"{name} shifted {shift:.3f} from baseline, exceeds MAX_PROB_SHIFT={max_shift}",
+                    )
+
+        adjustments = pred.get("adjustments") or []
+        if pred.get("adjustment_applied") and not adjustments:
+            add(
+                CriticCheckType.UNSUPPORTED_CLAIMS,
+                "adjustment_applied=true but no adjustments were listed",
+                severity="warning",
+            )
+        for adj in adjustments:
+            if not adj.get("evidence_refs"):
+                add(
+                    CriticCheckType.EVIDENCE_LINKAGE,
+                    f"Adjustment to {adj.get('adjustment_type')} has no evidence references",
+                    severity="warning",
+                )
+
+        if valid_probs and max(probs.values()) >= _OVERCONFIDENCE_THRESHOLD:
+            add(
+                CriticCheckType.OVERCONFIDENCE,
+                f"Extreme probability (>= {_OVERCONFIDENCE_THRESHOLD}) for a 5-day forecast",
+                severity="warning",
+            )
+
+    errors = [f.message for f in findings if f.severity == "error"]
+    result = CriticResult(
+        passed=not errors,
+        findings=findings,
+        revision_guidance="; ".join(errors)[:1000] if errors else None,
+    )
+    return {"critic_result": result.model_dump(mode="json")}
+
+
+def revision_node(state: GraphState) -> dict:
+    """Count revisions; once the budget is spent, fall back to the quant baseline."""
+    count = state.forecast_revision_count
+    critic = state.critic_result or {}
+    if critic.get("passed", False):
+        return {"forecast_revision_count": count}
+
+    if count < _max_revisions():
+        return {"forecast_revision_count": count + 1}
+
+    update: dict = {"forecast_revision_count": count + 1}
+    quant = state.quant_baseline
+    if quant and not quant.get("error"):
+        update["predictor_result"] = _quant_as_predictor_result(
+            quant, f"Max revisions ({_max_revisions()}) reached; using quant baseline"
+        )
+    return update
+
+
+def route_after_revision(state: GraphState) -> Literal["predictor", "final_forecast"]:
+    """Loop back to the predictor until the critic passes or revisions are exhausted."""
+    critic = state.critic_result or {}
+    if critic.get("passed", False) or state.forecast_revision_count > _max_revisions():
+        return "final_forecast"
+    return "predictor"
+
+
+def final_forecast_node(state: GraphState) -> dict:
+    """Consolidate the predictor output (or quant fallback) into the final forecast."""
+    quant = state.quant_baseline or {}
+    critic = state.critic_result
+    critic_passed = bool(critic.get("passed", False)) if critic else False
+
+    predictor: Optional[PredictorResult] = None
+    pred_raw = state.predictor_result
+    if pred_raw and "error" not in pred_raw:
+        try:
+            predictor = PredictorResult(**pred_raw)
+        except ValidationError as err:
+            logger.warning("final_forecast_invalid_predictor", error=str(err))
+
+    revisions_exhausted = (
+        not critic_passed and state.forecast_revision_count > _max_revisions()
+    )
+    fallback = predictor is None or revisions_exhausted
+
+    if predictor is None:
+        if not quant or quant.get("error"):
+            return {"final_forecast": {"error": "No valid forecast: predictor and quant baseline unavailable"}}
+        predictor = PredictorResult(
+            **_quant_as_predictor_result(quant, "Predictor output unavailable; using quant baseline")
+        )
+
+    reports = _collect_reports(state)
+    final = FinalForecast(
+        symbol=state.symbol,
+        forecast_date=date.today().isoformat(),
+        horizon_trading_days=quant.get("horizon_trading_days", get_settings().forecast_horizon_days),
+        prob_up=predictor.prob_up,
+        prob_flat=predictor.prob_flat,
+        prob_down=predictor.prob_down,
+        expected_return_pct=predictor.expected_return_pct,
+        p10_price=predictor.p10_price,
+        p50_price=predictor.p50_price,
+        p90_price=predictor.p90_price,
+        weekly_vol_pct=predictor.weekly_vol_pct,
+        adjustment_applied=predictor.adjustment_applied,
+        adjustments=predictor.adjustments,
+        quant_baseline=quant,
+        predictor_reasoning=predictor.reasoning,
+        critic_passed=critic_passed,
+        revision_count=state.forecast_revision_count,
+        fallback_to_quant=fallback,
+        evidence=_dedupe(predictor.evidence + [e for r in reports for e in r.get("evidence", [])]),
+        risks=_dedupe(predictor.risks + [x for r in reports for x in r.get("risks", [])]),
+    )
+    return {"final_forecast": final.model_dump(mode="json")}
 
 
 # ---------------------------------------------------------------------------
@@ -300,44 +595,33 @@ def make_decision_engine_node() -> callable:
 
 
 def join_node(state: GraphState) -> dict:
-    """Compile final report from all assembled pieces.
-
-    Runs after all analyst nodes complete. Merges technical,
-    fundamental, sentiment, and context reports along with
-    the decision and quant baseline into a final_report dict.
-    """
-    # Compile final report from all assembled pieces
+    """Compile the final report from all assembled pieces."""
     reports = {
         "technical": state.technical_report,
         "fundamental": state.fundamental_report,
         "sentiment": state.sentiment_report,
         "context": state.context_report,
     }
-    decision = state.decision
 
-    # Build summary stances
     stance_counts: dict[str, int] = {}
+    data_gaps: list = []
     for rpt_dict in reports.values():
         if rpt_dict is None:
             continue
+        data_gaps.extend(rpt_dict.get("data_gaps", []))
         try:
             rpt = AnalystReport(**rpt_dict)
-            stance_counts[rpt.stance] = stance_counts.get(rpt.stance, 0) + 1
-        except Exception:
+        except ValidationError:
             continue
+        stance_counts[rpt.stance.value] = stance_counts.get(rpt.stance.value, 0) + 1
 
     final_report = {
         "symbol": state.symbol,
         "analyst_stances": stance_counts,
-        "decision": (
-            DecisionResult(**decision).model_dump() if decision else None
-        ),
+        "decision": state.decision.model_dump(mode="json") if state.decision else None,
         "quant_baseline": state.quant_baseline,
-        "data_gaps": sum(
-            [rpt.get("data_gaps", []) if isinstance(rpt, dict) else []
-             for rpt in reports.values() if rpt],
-            [],
-        ),
+        "final_forecast": state.final_forecast,
+        "data_gaps": data_gaps,
     }
 
     return {"final_report": final_report}
@@ -351,117 +635,64 @@ def join_node(state: GraphState) -> dict:
 def build_workflow(
     llm_factory=None,
 ) -> StateGraph:
-    """Build the LangGraph workflow for Phase 5.
+    """Build the LangGraph workflow.
 
     Topology:
-        START
-          → symbol_resolver (placeholder – resolved before graph)
-          → collectors (placeholder – data pre-loaded into state)
+        mark_collectors
           → parallel analysts (technical, fundamental, sentiment, context)
+          → guardrails
           → decision_engine
           → quant_baseline
-          → join/final_report
-          → END
+          → adjustment_gate
+          → predictor → critic → revision ─┬→ predictor (revise, bounded)
+                                           └→ final_forecast
+          → join → END
     """
+    factory = get_llm_factory() if llm_factory is None else llm_factory
 
     workflow = StateGraph(GraphState)
 
-    # -- Collector placeholder: mark collectors complete --
-    def mark_collectors_complete(state: GraphState) -> GraphState:
-        return {**state.model_dump(), "collectors_complete": True}
-
-    workflow.add_node("mark_collectors", mark_collectors_complete)
+    # Collectors are pre-loaded into state; this node only marks them complete
+    workflow.add_node("mark_collectors", lambda state: {"collectors_complete": True})
     workflow.set_entry_point("mark_collectors")
 
-    # -- Parallel analyst nodes --
+    analysts = {
+        "technical_analyst": (AnalystType.TECHNICAL, "technical_analyst.txt"),
+        "fundamental_analyst": (AnalystType.FUNDAMENTAL, "fundamental_analyst.txt"),
+        "sentiment_analyst": (AnalystType.SENTIMENT, "sentiment_analyst.txt"),
+        "context_analyst": (AnalystType.CONTEXT, "context_analyst.txt"),
+    }
+    prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+    for node_name, (analyst_type, prompt_file) in analysts.items():
+        workflow.add_node(
+            node_name,
+            make_analyst_node(analyst_type, str(prompts_dir / prompt_file), factory),
+        )
+        workflow.add_edge("mark_collectors", node_name)
+        workflow.add_edge(node_name, "guardrails")
 
-    from stock_analysis.llm.factory import get_llm_factory
-
-    factory = get_llm_factory() if llm_factory is None else llm_factory
-
-    workflow.add_node(
-        "technical_analyst",
-        make_analyst_node(AnalystType.TECHNICAL, "src/stock_analysis/prompts/technical_analyst.txt", factory),
-    )
-    workflow.add_node(
-        "fundamental_analyst",
-        make_analyst_node(AnalystType.FUNDAMENTAL, "src/stock_analysis/prompts/fundamental_analyst.txt", factory),
-    )
-    workflow.add_node(
-        "sentiment_analyst",
-        make_analyst_node(AnalystType.SENTIMENT, "src/stock_analysis/prompts/sentiment_analyst.txt", factory),
-    )
-    workflow.add_node(
-        "context_analyst",
-        make_analyst_node(AnalystType.CONTEXT, "src/stock_analysis/prompts/context_analyst.txt", factory),
-    )
-
-    # -- Decision engine node --
-    workflow.add_node("decision_engine", make_decision_engine_node())
-
-    # -- Guardrail node --
     workflow.add_node("guardrails", make_guardrail_node())
-
-    # -- Quant baseline node (Phase 4 integration) --
-    from stock_analysis.quant.forecast import QuantForecaster, QuantBaseline
-
-    def quant_baseline_node(state: GraphState) -> dict:
-        # Use available summaries; no large data in state
-        tech_rpt = state.technical_report
-        ctx_rpt = state.context_report
-
-        # Simplified: if we have reports, generate a minimal baseline
-        # Full implementation would use QuantForecaster with real price data
-        if tech_rpt or ctx_rpt:
-            try:
-                # Parse a report if available
-                baseline = QuantBaseline(
-                    p10_price=100.0,
-                    p50_price=105.0,
-                    p90_price=110.0,
-                    expected_return_pct=5.0,
-                    prob_up=0.55,
-                    prob_down=0.35,
-                    prob_flat=0.10,
-                    weekly_vol_pct=15.0,
-                    horizon=5,
-                    n_paths=10000,
-                    seed=42,
-                    source="phase5_graph",
-                )
-                return {"quant_baseline": baseline.model_dump()}
-            except Exception as e:
-                return {
-                    "quant_baseline": {
-                        "error": str(e),
-                        "source": "phase5_graph_fallback",
-                    }
-                }
-        return {"quant_baseline": None}
-
+    workflow.add_node("decision_engine", make_decision_engine_node())
     workflow.add_node("quant_baseline", quant_baseline_node)
-
-    # -- Final join/fusion node --
+    workflow.add_node("adjustment_gate", adjustment_gate_node)
+    workflow.add_node("predictor", make_predictor_node(factory))
+    workflow.add_node("critic", critic_node)
+    workflow.add_node("revision", revision_node)
+    workflow.add_node("final_forecast", final_forecast_node)
     workflow.add_node("join", join_node)
 
-    # -- Edges (fan-out / fan-in) --
-    workflow.add_edge("mark_collectors", "technical_analyst")
-    workflow.add_edge("mark_collectors", "fundamental_analyst")
-    workflow.add_edge("mark_collectors", "sentiment_analyst")
-    workflow.add_edge("mark_collectors", "context_analyst")
-
-    # All analysts run in parallel; results merged by reducer
-    # After all analysts, proceed to guardrails
-    workflow.add_edge("technical_analyst", "guardrails")
-    workflow.add_edge("fundamental_analyst", "guardrails")
-    workflow.add_edge("sentiment_analyst", "guardrails")
-    workflow.add_edge("context_analyst", "guardrails")
-
-    # Guardrails to decision engine
     workflow.add_edge("guardrails", "decision_engine")
-
     workflow.add_edge("decision_engine", "quant_baseline")
-    workflow.add_edge("quant_baseline", "join")
+    workflow.add_edge("quant_baseline", "adjustment_gate")
+    workflow.add_edge("adjustment_gate", "predictor")
+    workflow.add_edge("predictor", "critic")
+    workflow.add_edge("critic", "revision")
+    workflow.add_conditional_edges(
+        "revision",
+        route_after_revision,
+        {"predictor": "predictor", "final_forecast": "final_forecast"},
+    )
+    workflow.add_edge("final_forecast", "join")
     workflow.add_edge("join", END)
 
     return workflow
@@ -471,7 +702,7 @@ def build_workflow(
 # Entry point for graph compilation
 # ---------------------------------------------------------------------------
 
-def compile_graph():
-    """Compile the Phase 5 LangGraph workflow."""
-    workflow = build_workflow()
-    return workflow.compile()
+
+def compile_graph(llm_factory=None):
+    """Compile the LangGraph workflow."""
+    return build_workflow(llm_factory).compile()

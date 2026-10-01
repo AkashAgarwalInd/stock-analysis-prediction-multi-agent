@@ -9,6 +9,15 @@ from .forecast import (
     ForecastFinal,
     PricePoint,
 )
+from .forecast_pipeline import (
+    ForecastAdjustment,
+    ForecastAdjustmentType,
+    PredictorResult,
+    CriticResult,
+    CriticFinding,
+    CriticCheckType,
+    FinalForecast,
+)
 from .evaluation import ForecastEvaluation, ForecastEvaluationCreate
 from .postmortem import Postmortem, PostmortemCreate
 from .audit import AuditLog, AuditLogCreate
@@ -27,6 +36,13 @@ __all__ = [
     "ForecastLLM",
     "ForecastFinal",
     "PricePoint",
+    "ForecastAdjustment",
+    "ForecastAdjustmentType",
+    "PredictorResult",
+    "CriticResult",
+    "CriticFinding",
+    "CriticCheckType",
+    "FinalForecast",
     "ForecastEvaluation",
     "ForecastEvaluationCreate",
     "Postmortem",

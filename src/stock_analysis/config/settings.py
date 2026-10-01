@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     nse_data_cache_dir: Path = Field(default=Path("data/cache"))
     forecast_horizon_days: int = 5
+    max_revisions: int = 2
+    predictor_max_prob_shift: float = 0.15
 
     @property
     def database_url(self) -> str:

@@ -276,3 +276,29 @@ class TestDecisionResult:
             assert False, "Should raise"
         except Exception:
             pass
+
+def test_gate_counts_each_analyst_not_each_distinct_stance():
+    """Four analysts sharing one stance are four confident analysts, not one."""
+    from stock_analysis.schemas.analyst_reports import (
+        AdjustmentGateDecision,
+        DecisionType,
+        RulesDecisionEngine,
+    )
+
+    reports = [
+        {
+            "analyst": analyst,
+            "stance": "bullish",
+            "confidence": 0.7,
+            "key_points": ["Trend is constructive"],
+            "evidence": ["Close above 20-day average"],
+            "risks": [],
+            "data_gaps": [],
+        }
+        for analyst in ("technical", "fundamental", "sentiment", "context")
+    ]
+    result = RulesDecisionEngine().decide(
+        DecisionType.FORECAST_ADJUSTMENT_GATE,
+        {"analyst_reports": reports, "quant_baseline": {"prob_up": 0.5}},
+    )
+    assert result.result == AdjustmentGateDecision.ALLOW_ADJUSTMENT.value

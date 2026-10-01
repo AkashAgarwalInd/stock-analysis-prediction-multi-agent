@@ -40,6 +40,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = ["mock_llm: test uses a mocked or unavailable LLM"]
 
 [tool.ruff]
 line-length = 100

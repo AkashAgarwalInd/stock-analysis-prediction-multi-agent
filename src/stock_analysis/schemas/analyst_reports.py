@@ -25,6 +25,7 @@ class DecisionType(str, Enum):
     MARKET_REGIME = "market_regime"
     RISK_CATEGORY = "risk_category"
     ANALYST_STANCE = "analyst_stance"
+    FORECAST_ADJUSTMENT_GATE = "forecast_adjustment_gate"
 
 
 class MarketRegime(str, Enum):
@@ -42,6 +43,12 @@ class RiskCategory(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class AdjustmentGateDecision(str, Enum):
+    """Decision from the forecast adjustment gate."""
+    NO_ADJUSTMENT = "no_adjustment"
+    ALLOW_ADJUSTMENT = "allow_adjustment"
 
 
 class DataGapSeverity(str, Enum):
@@ -213,21 +220,38 @@ class RulesDecisionEngine(DecisionEngineInterface):
 
     def decide(
         self,
-        decision_type: DecisionType,
+        decision_type: DecisionType | str,
         context: dict,
         options: dict | None = None,
     ) -> DecisionResult:
         """Classify decision using deterministic rules from analyst reports."""
+        
+        # Handle string decision_type for backward compatibility
+        if isinstance(decision_type, str):
+            try:
+                decision_type = DecisionType(decision_type)
+            except ValueError:
+                # Invalid decision type - degrade gracefully
+                return DecisionResult(
+                    decision_type=DecisionType.MARKET_REGIME,
+                    result=MarketRegime.SIDWAYS.value,
+                    confidence=0.0,
+                    rationale=f"Unsupported decision type: {decision_type}",
+                    model=self.name,
+                    model_version="0.1.0",
+                )
 
         # Gather analyst stances and data gaps from context
         reports = context.get("analyst_reports", [])
         all_gaps: list[str] = []
-        stances: dict[AnalystStance, float] = {}
+        # One (stance, confidence) entry per analyst; a dict keyed by stance would
+        # collapse analysts that share a stance and undercount consensus.
+        stances: list[tuple[AnalystStance, float]] = []
 
         for rpt in reports:
             try:
                 a_rpt = AnalystReport(**rpt)
-                stances[AnalystStance(a_rpt.stance)] = a_rpt.confidence
+                stances.append((AnalystStance(a_rpt.stance), a_rpt.confidence))
                 all_gaps.extend(a_rpt.data_gaps)
             except Exception:
                 continue
@@ -239,15 +263,15 @@ class RulesDecisionEngine(DecisionEngineInterface):
         try:
             if decision_type == DecisionType.MARKET_REGIME:
                 bullish = sum(
-                    1 for s in stances
+                    1 for s, _ in stances
                     if s in (AnalystStance.BULLISH, AnalystStance.STRONG_BULLISH)
                 )
                 bearish = sum(
-                    1 for s in stances
+                    1 for s, _ in stances
                     if s in (AnalystStance.BEARISH, AnalystStance.STRONG_BEARISH)
                 )
                 neutral = sum(
-                    1 for s in stances if s == AnalystStance.NEUTRAL
+                    1 for s, _ in stances if s == AnalystStance.NEUTRAL
                 )
 
                 if bullish > bearish and bullish > neutral:
@@ -258,7 +282,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
                     rationale = f"Bearish consensus ({bearish} bearish vs {bullish} bullish)"
                 elif any(
                     s in (AnalystStance.STRONG_BULLISH, AnalystStance.STRONG_BEARISH)
-                    for s in stances
+                    for s, _ in stances
                 ):
                     result = MarketRegime.HIGH_VOLATILITY.value
                     rationale = "High-confidence extreme stance detected"
@@ -284,7 +308,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
                     rationale = f"Critical data gaps detected: {critical_gaps}"
                 elif any(
                     s in (AnalystStance.STRONG_BULLISH, AnalystStance.STRONG_BEARISH)
-                    for s in stances
+                    for s, _ in stances
                 ):
                     result = RiskCategory.MEDIUM.value
                     rationale = "Extreme stances with moderate data"
@@ -298,10 +322,57 @@ class RulesDecisionEngine(DecisionEngineInterface):
                     rationale = "No analyst reports available"
                     primary_confidence = 0.0
                 else:
-                    primary = max(stances, key=stances.get)
+                    primary, primary_confidence = max(stances, key=lambda sc: sc[1])
                     result = primary.value
-                    primary_confidence = stances[primary]
                     rationale = f"Primary stance: {primary.value} (confidence={primary_confidence:.2f})"
+
+            elif decision_type == DecisionType.FORECAST_ADJUSTMENT_GATE:
+                # Allow adjustment only when:
+                # 1. No critical data gaps
+                # 2. At least 2 analysts with confidence > 0.5
+                # 3. Not all analysts in extreme disagreement
+                # 4. Quant baseline is available (passed via context)
+                quant_baseline = context.get("quant_baseline")
+                has_quant_baseline = quant_baseline is not None and not quant_baseline.get("error")
+
+                # Check critical gaps
+                critical_gaps = []
+                for g in all_gaps:
+                    if isinstance(g, DataGap):
+                        if g.severity == DataGapSeverity.CRITICAL:
+                            critical_gaps.append(g.description)
+                    elif isinstance(g, str):
+                        if "critical" in g.lower():
+                            critical_gaps.append(g)
+                    elif isinstance(g, dict):
+                        if g.get("severity") == "critical":
+                            critical_gaps.append(g.get("description", str(g)))
+
+                # Count confident analysts
+                confident_analysts = sum(1 for _, c in stances if c > 0.5)
+
+                # Check stance agreement (not all extreme opposites)
+                extreme_bullish = sum(1 for s, _ in stances if s == AnalystStance.STRONG_BULLISH)
+                extreme_bearish = sum(1 for s, _ in stances if s == AnalystStance.STRONG_BEARISH)
+                extreme_conflict = extreme_bullish > 0 and extreme_bearish > 0
+
+                if critical_gaps:
+                    result = AdjustmentGateDecision.NO_ADJUSTMENT.value
+                    rationale = f"Critical data gaps block adjustment: {critical_gaps}"
+                elif not has_quant_baseline:
+                    result = AdjustmentGateDecision.NO_ADJUSTMENT.value
+                    rationale = "No quant baseline available for adjustment"
+                elif confident_analysts < 2:
+                    result = AdjustmentGateDecision.NO_ADJUSTMENT.value
+                    rationale = f"Insufficient confident analysts ({confident_analysts}/4) for adjustment"
+                elif extreme_conflict:
+                    result = AdjustmentGateDecision.NO_ADJUSTMENT.value
+                    rationale = "Extreme bullish/bearish conflict prevents adjustment"
+                else:
+                    result = AdjustmentGateDecision.ALLOW_ADJUSTMENT.value
+                    rationale = f"Sufficient evidence for adjustment: {confident_analysts} confident analysts, no critical gaps, quant baseline available"
+
+                primary_confidence = 0.7  # Fixed confidence for gate decision
 
             else:
                 result = MarketRegime.SIDWAYS.value
@@ -316,7 +387,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
             decision_type = DecisionType.MARKET_REGIME  # use valid enum for pydantic
 
         return DecisionResult(
-            decision_type=effective_decision_type if 'effective_decision_type' in dir() else DecisionType.MARKET_REGIME,
+            decision_type=decision_type,
             result=result,
             confidence=primary_confidence,
             rationale=rationale,

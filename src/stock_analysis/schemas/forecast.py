@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -55,7 +56,6 @@ class ForecastFinal(BaseModel):
     def _validate_weights(self) -> "ForecastFinal":
         total = self.baseline_weight + self.llm_weight
         if abs(total - 1.0) > 0.001:
-            from pydantic import ValidationError
             raise ValueError("baseline_weight and llm_weight must sum to 1.0")
         return self
 

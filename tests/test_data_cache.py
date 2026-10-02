@@ -1,6 +1,6 @@
-import pytest
 from datetime import datetime, timedelta
-from unittest.mock import Mock, patch
+
+import pytest
 
 from stock_analysis.data.cache import DataCache
 from stock_analysis.data.fundamentals import Fundamentals

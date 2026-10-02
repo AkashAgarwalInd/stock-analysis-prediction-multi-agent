@@ -2,28 +2,40 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from stock_analysis.database import Database
+from stock_analysis.data.cache import DataCache
 from stock_analysis.data.fundamentals import Fundamentals, FundamentalsCollector
 from stock_analysis.data.market_context import MarketContext, MarketContextCollector
 from stock_analysis.data.news import NewsCollection, NewsCollector, NewsItem
-from stock_analysis.data.cache import DataCache
+from stock_analysis.database import Database
 from stock_analysis.logging import get_logger
 
 logger = get_logger(__name__)
 
 
+_DATETIME_FIELDS = ("fetched_at", "published_at", "earnings_date")
+
+
+def _restore_datetimes(data: dict) -> dict:
+    """Turn ISO strings written by the cache serializer back into datetimes."""
+    restored = dict(data)
+    for key in _DATETIME_FIELDS:
+        if isinstance(restored.get(key), str):
+            restored[key] = datetime.fromisoformat(restored[key])
+    return restored
+
+
 def _fundamentals_from_dict(data: dict) -> Fundamentals:
-    return Fundamentals(**data)
+    return Fundamentals(**_restore_datetimes(data))
 
 
 def _news_from_dict(data: dict) -> NewsCollection:
-    items = [NewsItem(**item) for item in data.get("items", [])]
-    data["items"] = items
+    data = _restore_datetimes(data)
+    data["items"] = [NewsItem(**_restore_datetimes(item)) for item in data.get("items", [])]
     return NewsCollection(**data)
 
 
 def _market_context_from_dict(data: dict) -> MarketContext:
-    return MarketContext(**data)
+    return MarketContext(**_restore_datetimes(data))
 
 
 @dataclass

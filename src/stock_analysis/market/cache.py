@@ -1,6 +1,6 @@
 import json
-import sqlite3
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -57,11 +57,11 @@ class PriceCache:
             pd_obj = PriceData(
                 symbol=d["symbol"],
                 date=date.fromisoformat(d["date"]),
-                open=eval(d["open"]) if d.get("open") else None,
-                high=eval(d["high"]) if d.get("high") else None,
-                low=eval(d["low"]) if d.get("low") else None,
-                close=eval(d["close"]) if d.get("close") else None,
-                adj_close=eval(d["adj_close"]) if d.get("adj_close") else None,
+                open=Decimal(d["open"]) if d.get("open") else None,
+                high=Decimal(d["high"]) if d.get("high") else None,
+                low=Decimal(d["low"]) if d.get("low") else None,
+                close=Decimal(d["close"]) if d.get("close") else None,
+                adj_close=Decimal(d["adj_close"]) if d.get("adj_close") else None,
                 volume=d.get("volume"),
                 source=d.get("source", "yfinance"),
                 fetched_at=datetime.fromisoformat(d["fetched_at"]),

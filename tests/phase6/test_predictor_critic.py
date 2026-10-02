@@ -1,23 +1,22 @@
 """Phase 6 Predictor and Critic Tests."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from datetime import date
 
-from stock_analysis.schemas.forecast_pipeline import (
-    PredictorResult,
-    CriticResult,
-    CriticFinding,
-    CriticCheckType,
-    ForecastAdjustment,
-    ForecastAdjustmentType,
-    FinalForecast,
-)
+import pytest
+
 from stock_analysis.langgraph.workflow import (
     build_predictor_prompt,
     critic_node,
     final_forecast_node,
     revision_node,
+)
+from stock_analysis.schemas.forecast_pipeline import (
+    CriticCheckType,
+    CriticFinding,
+    CriticResult,
+    FinalForecast,
+    ForecastAdjustment,
+    ForecastAdjustmentType,
+    PredictorResult,
 )
 from stock_analysis.schemas.graph_state import GraphState
 
@@ -75,9 +74,9 @@ class TestPredictorPrompt:
                 "data_gaps": [],
             }
         ]
-        
+
         prompt = build_predictor_prompt(quant, reports, [], [], [])
-        
+
         assert "QUANT BASELINE" in prompt
         assert "0.55" in prompt  # prob_up
         assert "TECHNICAL ANALYST" in prompt
@@ -126,9 +125,9 @@ class TestCriticNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         result = critic_node(state)
-        
+
         assert "critic_result" in result
         critic_result = CriticResult(**result["critic_result"])
         assert critic_result.passed is True
@@ -142,10 +141,10 @@ class TestCriticNode:
             predictor_result=_raw_prediction(prob_up=1.5, prob_down=-0.1),
             quant_baseline={},
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         assert critic_result.passed is False
         assert critic_result.revision_required is True
         # Should have probability validity errors
@@ -174,10 +173,10 @@ class TestCriticNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         assert critic_result.passed is False
         sum_errors = [f for f in critic_result.findings if f.check_type == CriticCheckType.PROBABILITY_SUM]
         assert len(sum_errors) == 1
@@ -191,10 +190,10 @@ class TestCriticNode:
             predictor_result=_raw_prediction(p10_price=105.0),  # P10 > P50
             quant_baseline={},
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         assert critic_result.passed is False
         ordering_errors = [f for f in critic_result.findings if f.check_type == CriticCheckType.PRICE_ORDERING]
         assert len(ordering_errors) == 1
@@ -223,10 +222,10 @@ class TestCriticNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         assert critic_result.passed is False
         excessive_errors = [f for f in critic_result.findings if f.check_type == CriticCheckType.EXCESSIVE_ADJUSTMENT]
         assert len(excessive_errors) >= 1
@@ -262,7 +261,7 @@ class TestCriticNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         state = GraphState(
             symbol="RELIANCE",
             resolved_symbol="RELIANCE",
@@ -273,10 +272,10 @@ class TestCriticNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         # Should pass but have warning
         assert critic_result.passed is True
         evidence_warnings = [f for f in critic_result.findings if f.check_type == CriticCheckType.EVIDENCE_LINKAGE]
@@ -301,17 +300,17 @@ class TestCriticNode:
             risks=[],
             quant_baseline_ref={},
         )
-        
+
         state = GraphState(
             symbol="RELIANCE",
             resolved_symbol="RELIANCE",
             predictor_result=result.model_dump(),
             quant_baseline={},
         )
-        
+
         result = critic_node(state)
         critic_result = CriticResult(**result["critic_result"])
-        
+
         assert critic_result.passed is True
         overconf_warnings = [f for f in critic_result.findings if f.check_type == CriticCheckType.OVERCONFIDENCE]
         assert len(overconf_warnings) == 1
@@ -329,9 +328,9 @@ class TestRevisionNode:
             critic_result=CriticResult(passed=True, findings=[]).model_dump(),
             forecast_revision_count=0,
         )
-        
+
         result = revision_node(state)
-        
+
         assert result.get("forecast_revision_count") == 0
 
     def test_revision_max_reached(self):
@@ -347,7 +346,7 @@ class TestRevisionNode:
             "weekly_vol_pct": 15.0,
             "horizon_trading_days": 5,
         }
-        
+
         state = GraphState(
             symbol="RELIANCE",
             resolved_symbol="RELIANCE",
@@ -365,9 +364,9 @@ class TestRevisionNode:
             ).model_dump(),
             forecast_revision_count=2,  # Already at max
         )
-        
+
         result = revision_node(state)
-        
+
         assert "predictor_result" in result
         assert result.get("forecast_revision_count") == 3
         # Should have fallback predictor result
@@ -393,9 +392,9 @@ class TestRevisionNode:
             ).model_dump(),
             forecast_revision_count=0,
         )
-        
+
         result = revision_node(state)
-        
+
         assert result.get("forecast_revision_count") == 1
         # Should not have fallback predictor result yet
         assert "predictor_result" not in result
@@ -434,7 +433,7 @@ class TestFinalForecastNode:
                 "prob_down": 0.15,
             },
         )
-        
+
         quant = {
             "prob_up": 0.55,
             "prob_flat": 0.30,
@@ -446,7 +445,7 @@ class TestFinalForecastNode:
             "weekly_vol_pct": 15.0,
             "horizon_trading_days": 5,
         }
-        
+
         state = GraphState(
             symbol="RELIANCE",
             resolved_symbol="RELIANCE",
@@ -457,9 +456,9 @@ class TestFinalForecastNode:
             technical_report={"evidence": ["RSI>70"]},
             fundamental_report={"evidence": ["P/E=25"]},
         )
-        
+
         result = final_forecast_node(state)
-        
+
         assert "final_forecast" in result
         final = FinalForecast(**result["final_forecast"])
         assert final.symbol == "RELIANCE"
@@ -491,9 +490,9 @@ class TestFinalForecastNode:
             critic_result=CriticResult(passed=False, findings=[]).model_dump(),
             forecast_revision_count=0,
         )
-        
+
         result = final_forecast_node(state)
-        
+
         assert "final_forecast" in result
         final = FinalForecast(**result["final_forecast"])
         assert final.fallback_to_quant is True

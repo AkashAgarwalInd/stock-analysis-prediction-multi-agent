@@ -1,8 +1,9 @@
-import pytest
 from datetime import datetime, timedelta
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, Mock, patch
 
-from stock_analysis.data.news import NewsItem, NewsCollection, NewsCollector
+import pytest
+
+from stock_analysis.data.news import NewsCollection, NewsCollector, NewsItem
 
 
 class MockFeedParserDict(dict):

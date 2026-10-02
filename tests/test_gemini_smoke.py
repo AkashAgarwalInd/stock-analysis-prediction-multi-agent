@@ -1,10 +1,9 @@
 import os
+
 import pytest
-from unittest.mock import MagicMock, patch
 
-from stock_analysis.llm import get_llm_factory, LLMModel
+from stock_analysis.llm import LLMModel, get_llm_factory
 from stock_analysis.schemas import ForecastLLM
-
 
 # Skip all tests in this file due to google.generativeai pkg_resources issue
 pytestmark = pytest.mark.skip(reason="Skipping due to google.generativeai pkg_resources compatibility issue")

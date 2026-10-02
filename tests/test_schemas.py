@@ -5,18 +5,18 @@ import pytest
 from pydantic import ValidationError
 
 from stock_analysis.schemas import (
+    AuditLogCreate,
+    ForecastBaseline,
+    ForecastCreate,
+    ForecastEvaluationCreate,
+    ForecastFinal,
+    ForecastLLM,
+    ForecastUpdate,
+    PostmortemCreate,
+    PricePoint,
     Symbol,
     SymbolCreate,
     SymbolUpdate,
-    ForecastBaseline,
-    ForecastLLM,
-    ForecastFinal,
-    PricePoint,
-    ForecastCreate,
-    ForecastUpdate,
-    ForecastEvaluationCreate,
-    PostmortemCreate,
-    AuditLogCreate,
 )
 
 

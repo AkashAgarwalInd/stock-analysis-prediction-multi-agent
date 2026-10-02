@@ -3,7 +3,7 @@ from rich.console import Console
 from rich.table import Table
 
 from stock_analysis.config import get_settings
-from stock_analysis.database import init_database, close_database, run_migrations
+from stock_analysis.database import close_database, init_database, run_migrations
 from stock_analysis.logging import configure_logging, get_logger
 
 app = typer.Typer(
@@ -76,7 +76,7 @@ def config() -> None:
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
-    for field_name, field_info in settings.model_fields.items():
+    for field_name in settings.model_fields:
         value = getattr(settings, field_name)
         if field_name == "gemini_api_key" and value:
             value = "***" + value[-4:] if len(value) > 4 else "***"

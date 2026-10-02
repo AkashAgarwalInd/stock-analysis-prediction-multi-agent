@@ -15,6 +15,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from stock_analysis.config.settings import get_settings
+
 
 class ForecastAdjustmentType(str, Enum):
     """Types of forecast adjustments."""
@@ -45,7 +47,7 @@ class ForecastAdjustment(BaseModel):
     evidence_refs: List[str] = Field(default_factory=list, max_items=5)
 
     @model_validator(mode="after")
-    def validate_change_magnitude(self) -> "ForecastAdjustment":
+    def validate_change_magnitude(self) -> ForecastAdjustment:
         """Validate adjustment magnitude is reasonable."""
         if self.previous_value == 0:
             return self
@@ -90,7 +92,7 @@ class PredictorResult(BaseModel):
     quant_baseline_ref: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_probabilities_sum(self) -> "PredictorResult":
+    def validate_probabilities_sum(self) -> PredictorResult:
         """Ensure probabilities sum to 1.0 within tolerance."""
         total = self.prob_up + self.prob_flat + self.prob_down
         if abs(total - 1.0) > 0.001:
@@ -101,7 +103,7 @@ class PredictorResult(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_price_ordering(self) -> "PredictorResult":
+    def validate_price_ordering(self) -> PredictorResult:
         """Ensure P10 < P50 < P90."""
         if not (self.p10_price < self.p50_price < self.p90_price):
             raise ValueError(
@@ -111,12 +113,11 @@ class PredictorResult(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_quant_drift(self) -> "PredictorResult":
+    def validate_quant_drift(self) -> PredictorResult:
         """Warn if forecast drifts too far from quant baseline."""
         qb = self.quant_baseline_ref
         if qb:
-            # Check probability shifts (MAX_PROB_SHIFT = 0.15)
-            max_prob_shift = 0.15
+            max_prob_shift = get_settings().predictor_max_prob_shift
             for field, pred_val in [
                 ("prob_up", self.prob_up),
                 ("prob_flat", self.prob_flat),
@@ -164,7 +165,7 @@ class CriticResult(BaseModel):
     revision_guidance: Optional[str] = Field(default=None, max_length=1000)
 
     @model_validator(mode="after")
-    def set_revision_flag(self) -> "CriticResult":
+    def set_revision_flag(self) -> CriticResult:
         """Set revision_required if any error-level findings exist."""
         self.revision_required = any(f.severity == "error" for f in self.findings)
         return self
@@ -202,7 +203,7 @@ class FinalForecast(BaseModel):
     risks: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_final_forecast(self) -> "FinalForecast":
+    def validate_final_forecast(self) -> FinalForecast:
         """Validate final forecast constraints."""
         # Probability sum
         total = self.prob_up + self.prob_flat + self.prob_down

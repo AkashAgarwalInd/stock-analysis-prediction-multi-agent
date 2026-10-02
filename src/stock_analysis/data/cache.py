@@ -1,7 +1,7 @@
 import json
-from dataclasses import asdict, is_dataclass, fields
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional, TypeVar, Generic
+from typing import Any, Callable, Generic, Optional, TypeVar
 
 from stock_analysis.database import Database
 from stock_analysis.logging import get_logger
@@ -13,9 +13,9 @@ T = TypeVar("T")
 
 class DataCache(Generic[T]):
     def __init__(
-        self, 
-        db: Database, 
-        table_name: str, 
+        self,
+        db: Database,
+        table_name: str,
         ttl_hours: int = 24,
         deserializer: Optional[Callable[[dict], T]] = None
     ):

@@ -2,7 +2,6 @@ from typer.testing import CliRunner
 
 from stock_analysis.cli import app
 
-
 runner = CliRunner()
 
 

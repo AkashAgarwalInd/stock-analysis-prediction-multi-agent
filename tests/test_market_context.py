@@ -1,6 +1,7 @@
-import pytest
 from datetime import datetime
 from unittest.mock import Mock, patch
+
+import pytest
 
 from stock_analysis.data.market_context import MarketContext, MarketContextCollector
 
@@ -52,8 +53,8 @@ class TestMarketContextCollector:
             return None
 
         def mock_history(symbol, period):
-            import pandas as pd
             import numpy as np
+            import pandas as pd
             dates = pd.date_range(end=datetime.now(), periods=100, freq="D")
             base = 100 if "NSEI" not in symbol else 22000
             prices = base * (1 + np.cumsum(np.random.randn(100) * 0.01))

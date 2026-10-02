@@ -1,28 +1,26 @@
 from datetime import date
-from decimal import Decimal
-from unittest.mock import Mock, patch
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import pytest
 
 from stock_analysis.indicators.technical import (
-    calculate_sma,
-    calculate_ema,
-    calculate_rsi,
-    calculate_macd,
-    calculate_atr,
-    calculate_bollinger_bands,
-    calculate_volume_trend,
-    calculate_52week_position,
-    calculate_realized_volatility,
-    calculate_rolling_returns,
-    calculate_drawdown,
-    calculate_momentum,
-    calculate_relative_strength,
-    compute_all_indicators,
     TechnicalIndicators,
     TrendDirection,
+    calculate_52week_position,
+    calculate_atr,
+    calculate_bollinger_bands,
+    calculate_drawdown,
+    calculate_ema,
+    calculate_macd,
+    calculate_momentum,
+    calculate_realized_volatility,
+    calculate_relative_strength,
+    calculate_rolling_returns,
+    calculate_rsi,
+    calculate_sma,
+    calculate_volume_trend,
+    compute_all_indicators,
 )
 
 

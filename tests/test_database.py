@@ -1,10 +1,7 @@
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from stock_analysis.database import Database, get_database, init_database, close_database
-from stock_analysis.config import get_settings
+from stock_analysis.database import Database, close_database, get_database, init_database
 
 
 class TestDatabase:
@@ -58,10 +55,9 @@ class TestDatabase:
         conn = db.connect()
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
 
-        with pytest.raises(ValueError):
-            with db.transaction() as txn:
-                txn.execute("INSERT INTO test (value) VALUES (?)", ("rolled_back",))
-                raise ValueError("intentional rollback")
+        with pytest.raises(ValueError), db.transaction() as txn:
+            txn.execute("INSERT INTO test (value) VALUES (?)", ("rolled_back",))
+            raise ValueError("intentional rollback")
 
         cursor = conn.execute("SELECT COUNT(*) as cnt FROM test")
         row = cursor.fetchone()

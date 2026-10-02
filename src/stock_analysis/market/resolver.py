@@ -216,10 +216,10 @@ class SymbolResolver:
         return 1 - distances[-1] / max_len if max_len > 0 else 1.0
 
     def _to_yfinance_symbol(self, symbol: str) -> str:
-        symbol = symbol.upper().replace(" ", "").replace("-", "").replace(".", "")
-        if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
-            return symbol + ".NS"
-        return symbol
+        symbol = symbol.upper().replace(" ", "")
+        if symbol.endswith((".NS", ".BO")):
+            return symbol
+        return symbol.replace("-", "").replace(".", "") + ".NS"
 
     def resolve_batch(self, inputs: list[str]) -> dict[str, Optional[ResolvedSymbol]]:
         return {inp: self.resolve(inp) for inp in inputs}

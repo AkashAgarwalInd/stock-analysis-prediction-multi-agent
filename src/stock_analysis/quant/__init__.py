@@ -1,9 +1,9 @@
 from stock_analysis.quant.forecast import (
+    EWMAVolatility,
+    HistoricalReturns,
     QuantBaseline,
     QuantForecaster,
-    EWMAVolatility,
     VolatilityModel,
-    HistoricalReturns,
     compute_momentum_drift,
 )
 

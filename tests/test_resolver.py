@@ -1,9 +1,6 @@
-from datetime import date
-from unittest.mock import Mock, patch, MagicMock
 
-import pytest
 
-from stock_analysis.market.resolver import SymbolResolver, ResolvedSymbol
+from stock_analysis.market.resolver import ResolvedSymbol, SymbolResolver
 
 
 class TestSymbolResolver:

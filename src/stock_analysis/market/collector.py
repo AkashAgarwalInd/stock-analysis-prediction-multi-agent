@@ -2,13 +2,16 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
 from functools import lru_cache
+from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
 import yfinance as yf
 
 from stock_analysis.logging import get_logger
+
+if TYPE_CHECKING:
+    from stock_analysis.market.cache import PriceCache
 
 logger = get_logger(__name__)
 

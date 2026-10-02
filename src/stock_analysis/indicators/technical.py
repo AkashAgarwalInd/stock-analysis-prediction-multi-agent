@@ -1,10 +1,10 @@
-import pandas as pd
-import numpy as np
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
-from typing import Optional
 from enum import Enum
+from typing import Optional
+
+import numpy as np
+import pandas as pd
 
 from stock_analysis.logging import get_logger
 

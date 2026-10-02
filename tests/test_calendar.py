@@ -1,13 +1,11 @@
-from datetime import date, timedelta
-
-import pytest
+from datetime import date
 
 from stock_analysis.market.calendar import (
     TradingCalendar,
+    get_trading_days,
     is_trading_day,
     next_trading_day,
     previous_trading_day,
-    get_trading_days,
 )
 
 

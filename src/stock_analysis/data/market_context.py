@@ -27,6 +27,7 @@ class MarketContext:
     usd_inr_change: Optional[float] = None
     sector_index: Optional[float] = None
     sector_index_change: Optional[float] = None
+    sector_index_change_pct: Optional[float] = None
     sector_name: Optional[str] = None
     relative_strength_vs_nifty: Optional[float] = None
     beta: Optional[float] = None

@@ -1,14 +1,11 @@
 import os
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from stock_analysis.market.cache import PriceCache
-from stock_analysis.market.collector import PriceHistory, PriceData
-from stock_analysis.config import get_settings
+from stock_analysis.market.collector import PriceData, PriceHistory
 
 
 class TestPriceCache:

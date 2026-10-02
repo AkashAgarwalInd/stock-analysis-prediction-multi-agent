@@ -1,8 +1,6 @@
 """Unit tests for Phase 5 DecisionEngine and RulesDecisionEngine."""
 
 from stock_analysis.schemas.analyst_reports import (
-    AnalystReport,
-    AnalystType,
     AnalystStance,
     DecisionResult,
     DecisionType,
@@ -208,7 +206,7 @@ class TestRulesDecisionEngine:
             {"analyst_reports": []},
         )
 
-        assert result.result == MarketRegime.SIDWAYS.value
+        assert result.result == MarketRegime.SIDEWAYS.value
 
 
 class TestDecisionResult:

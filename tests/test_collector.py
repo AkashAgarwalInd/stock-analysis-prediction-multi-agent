@@ -1,11 +1,12 @@
-import pytest
 from datetime import datetime
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from stock_analysis.data.collector import CompleteData, DataCollector
 from stock_analysis.data.fundamentals import Fundamentals
-from stock_analysis.data.news import NewsCollection, NewsItem
 from stock_analysis.data.market_context import MarketContext
+from stock_analysis.data.news import NewsCollection, NewsItem
 from stock_analysis.database import Database
 
 

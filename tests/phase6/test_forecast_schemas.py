@@ -1,16 +1,17 @@
 """Phase 6 Forecast Pipeline Schema Tests."""
 
-import pytest
 from datetime import date
 
+import pytest
+
 from stock_analysis.schemas.forecast_pipeline import (
+    CriticCheckType,
+    CriticFinding,
+    CriticResult,
+    FinalForecast,
     ForecastAdjustment,
     ForecastAdjustmentType,
     PredictorResult,
-    CriticResult,
-    CriticFinding,
-    CriticCheckType,
-    FinalForecast,
 )
 
 

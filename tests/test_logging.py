@@ -1,8 +1,5 @@
-import logging
-from io import StringIO
-from unittest.mock import patch
 
-from stock_analysis.logging import configure_logging, get_logger, bind_context, clear_context
+from stock_analysis.logging import bind_context, clear_context, configure_logging, get_logger
 
 
 class TestLogging:

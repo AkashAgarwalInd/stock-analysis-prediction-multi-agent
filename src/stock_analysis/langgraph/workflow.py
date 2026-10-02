@@ -128,7 +128,10 @@ def make_analyst_node(
     2. Formats the prompt with available data
     3. Calls LLM for structured output via the factory
     4. Returns a single ``<analyst>_report`` dict (Pydantic-validated)
+
+    Raises ``FileNotFoundError`` at build time if the prompt file is missing.
     """
+    instructions = Path(prompt_path).read_text()
 
     def analyst_node(state: GraphState) -> dict:
         # Compact summaries only; never large datasets
@@ -150,8 +153,6 @@ def make_analyst_node(
                 "market_context": state.market_context_summary or {},
             }
 
-        path = Path(prompt_path)
-        instructions = path.read_text() if path.exists() else ""
         prompt = f"{instructions}\n\nINPUT DATA:\n{json.dumps(prompt_data, default=str)}"
 
         try:
@@ -160,8 +161,6 @@ def make_analyst_node(
                 role=LLMModel.PRIMARY,
                 prompt=prompt,
                 response_schema=AnalystReport,
-                temperature=0.1,
-                max_tokens=2048,
             )
             report_dict = response.model_dump(mode="json")
         except Exception as err:
@@ -235,7 +234,9 @@ def quant_baseline_node(state: GraphState) -> dict:
     if len(close_prices) < 20:
         return _failed(f"Insufficient valid close prices for {state.resolved_symbol}")
 
-    forecaster = QuantForecaster(seed=42, n_paths=10000, horizon=5)
+    forecaster = QuantForecaster(
+        seed=42, n_paths=10000, horizon=get_settings().forecast_horizon_days
+    )
     try:
         baseline = forecaster.forecast(close_prices)
     except ValueError as err:
@@ -397,8 +398,6 @@ def make_predictor_node(llm_factory=None) -> Callable[[GraphState], dict]:
                 role=LLMModel.PRIMARY,
                 prompt=prompt,
                 response_schema=PredictorResult,
-                temperature=0.1,
-                max_tokens=4096,
             )
             # Re-validate against the real baseline so the drift bound cannot be
             # bypassed by an LLM that omits or alters quant_baseline_ref.

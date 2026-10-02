@@ -2,8 +2,8 @@
 
 import pytest
 
-from stock_analysis.langgraph.workflow import compile_graph, GraphState
-from stock_analysis.schemas.analyst_reports import AnalystReport, AnalystType, AnalystStance
+from stock_analysis.langgraph.workflow import GraphState, compile_graph
+from stock_analysis.schemas.analyst_reports import AnalystType
 
 
 class TestGraphIntegration:

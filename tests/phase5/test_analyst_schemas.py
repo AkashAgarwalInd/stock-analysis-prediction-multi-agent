@@ -7,8 +7,8 @@ import pytest
 
 from stock_analysis.schemas.analyst_reports import (
     AnalystReport,
-    AnalystType,
     AnalystStance,
+    AnalystType,
     DecisionResult,
     DecisionType,
     MarketRegime,

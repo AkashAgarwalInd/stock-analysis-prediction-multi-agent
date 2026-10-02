@@ -2,11 +2,11 @@ import numpy as np
 import pytest
 
 from stock_analysis.quant import (
+    EWMAVolatility,
+    HistoricalReturns,
     QuantBaseline,
     QuantForecaster,
-    EWMAVolatility,
     VolatilityModel,
-    HistoricalReturns,
     compute_momentum_drift,
 )
 

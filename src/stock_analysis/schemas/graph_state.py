@@ -43,6 +43,7 @@ class GraphState(BaseModel):
 
     symbol: str
     resolved_symbol: str
+    company_name: Optional[str] = None
     collectors_complete: bool = False
 
     # Collector outputs (references/IDs/summaries, not large data)
@@ -63,12 +64,25 @@ class GraphState(BaseModel):
 
     # Decision engine output
     decision: Optional[DecisionResult] = None
+    risk_decision: Optional[DecisionResult] = None
     adjustment_gate_decision: Optional[DecisionResult] = None
 
     # Forecast pipeline outputs
+    price_snapshot: Optional[dict] = None  # fingerprint of the price history used
     quant_baseline: Optional[dict] = None
+    quant_daily_path: Optional[list[dict]] = None
     predictor_result: Optional[dict] = None
     critic_result: Optional[dict] = None
     forecast_revision_count: int = 0
     final_forecast: Optional[dict] = None
     final_report: Optional[dict] = None
+
+    # Phase 7 snapshot outputs (the snapshot itself lives in SQLite, not state)
+    forecast_id: Optional[str] = None
+    data_snapshot_id: Optional[str] = None
+    snapshot_persisted: bool = False
+    forecast_report: Optional[str] = None
+
+    # Phase 7 memory (Plan.md): prior context loaded at the start, insight written at the end
+    memory_context: Optional[dict] = None
+    memory_written: bool = False

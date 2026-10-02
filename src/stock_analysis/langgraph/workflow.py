@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
@@ -11,6 +12,8 @@ from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
 from stock_analysis.config.settings import get_settings
+from stock_analysis.database.forecast_store import ForecastSnapshotError, ForecastSnapshotStore
+from stock_analysis.database.memory_store import MemoryStore, MemoryStoreError
 from stock_analysis.guardrails import run_preflight_guardrails
 from stock_analysis.llm.factory import LLMModel, get_llm_factory
 from stock_analysis.logging import get_logger
@@ -23,6 +26,7 @@ from stock_analysis.schemas.analyst_reports import (
     DecisionResult,
     DecisionType,
     MarketRegime,
+    RiskCategory,
     RulesDecisionEngine,
 )
 from stock_analysis.schemas.forecast_pipeline import (
@@ -33,6 +37,21 @@ from stock_analysis.schemas.forecast_pipeline import (
     PredictorResult,
 )
 from stock_analysis.schemas.graph_state import GraphState
+from stock_analysis.schemas.memory import ForecastInsight, MemoryContext
+from stock_analysis.schemas.snapshot import PriceHistorySnapshot
+from stock_analysis.snapshots import (
+    SnapshotNotReadyError,
+    build_forecast_snapshot,
+    render_forecast_report,
+)
+from stock_analysis.snapshots.builder import IST
+from stock_analysis.versions import (
+    ANALYST_PROMPT_FILES,
+    PROMPTS_DIR,
+    QUANT_HISTORY_PERIOD,
+    QUANT_N_PATHS,
+    QUANT_SEED,
+)
 
 logger = get_logger(__name__)
 
@@ -197,13 +216,25 @@ def make_decision_engine_node() -> Callable[[GraphState], dict]:
 
     def decide_node(state: GraphState) -> dict:
         if state.guardrail_violations and state.decision is not None:
-            return {"decision": state.decision.model_dump(mode="json")}
+            risk = DecisionResult(
+                decision_type=DecisionType.RISK_CATEGORY,
+                result=RiskCategory.HIGH.value,
+                confidence=1.0,
+                rationale="Guardrail violations: analyst evidence is unusable",
+                model="guardrails",
+            )
+            return {
+                "decision": state.decision.model_dump(mode="json"),
+                "risk_decision": risk.model_dump(mode="json"),
+            }
 
-        result = engine.decide(
-            DecisionType.MARKET_REGIME,
-            {"analyst_reports": _collect_reports(state)},
-        )
-        return {"decision": result.model_dump(mode="json")}
+        context = {"analyst_reports": _collect_reports(state)}
+        result = engine.decide(DecisionType.MARKET_REGIME, context)
+        risk = engine.decide(DecisionType.RISK_CATEGORY, context)
+        return {
+            "decision": result.model_dump(mode="json"),
+            "risk_decision": risk.model_dump(mode="json"),
+        }
 
     return decide_node
 
@@ -213,35 +244,58 @@ def make_decision_engine_node() -> Callable[[GraphState], dict]:
 # ---------------------------------------------------------------------------
 
 
-def quant_baseline_node(state: GraphState) -> dict:
-    """Generate the Phase 4 quant baseline from real price history."""
-    from stock_analysis.market.collector import get_price_collector
+def make_quant_baseline_node(
+    price_store: Optional[ForecastSnapshotStore] = None,
+) -> Callable[[GraphState], dict]:
+    """Quant baseline node; with ``price_store`` it also persists the exact close series.
 
-    def _failed(reason: str) -> dict:
-        return {"quant_baseline": {"error": reason, "source": "quant_baseline_node_failed"}}
+    The stored series (content-addressed by ``history_sha256``) is what lets a
+    snapshot's baseline be reproduced later (``snapshots.reproduce``).
+    """
 
-    try:
-        price_history = get_price_collector().fetch_history(
-            state.resolved_symbol, period="2y", interval="1d"
+    def quant_baseline_node(state: GraphState) -> dict:
+        """Generate the Phase 4 quant baseline from real price history."""
+        from stock_analysis.market.collector import get_price_collector
+
+        def _failed(reason: str) -> dict:
+            return {"quant_baseline": {"error": reason, "source": "quant_baseline_node_failed"}}
+
+        try:
+            price_history = get_price_collector().fetch_history(
+                state.resolved_symbol, period=QUANT_HISTORY_PERIOD, interval="1d"
+            )
+        except Exception as err:
+            logger.warning(
+                "quant_price_fetch_failed", symbol=state.resolved_symbol, error=str(err)
+            )
+            return _failed(f"Price fetch failed for {state.resolved_symbol}: {err}")
+
+        points = [d for d in (price_history.data or []) if d.close is not None]
+        close_prices = np.array([float(d.close) for d in points])
+        if len(close_prices) < 20:
+            return _failed(f"Insufficient valid close prices for {state.resolved_symbol}")
+
+        forecaster = QuantForecaster(
+            seed=QUANT_SEED, n_paths=QUANT_N_PATHS, horizon=get_settings().forecast_horizon_days
         )
-    except Exception as err:
-        logger.warning("quant_price_fetch_failed", symbol=state.resolved_symbol, error=str(err))
-        return _failed(f"Price fetch failed for {state.resolved_symbol}: {err}")
+        try:
+            baseline, daily_path = forecaster.forecast_with_daily_path(close_prices)
+        except ValueError as err:
+            return _failed(str(err))
 
-    close_prices = np.array(
-        [float(d.close) for d in (price_history.data or []) if d.close is not None]
-    )
-    if len(close_prices) < 20:
-        return _failed(f"Insufficient valid close prices for {state.resolved_symbol}")
+        history = PriceHistorySnapshot.from_points(state.resolved_symbol, points)
+        if price_store is not None:
+            price_store.save_price_history(history)
+        return {
+            "quant_baseline": asdict(baseline),
+            "quant_daily_path": [asdict(d) for d in daily_path],
+            "price_snapshot": history.fingerprint(),
+        }
 
-    forecaster = QuantForecaster(
-        seed=42, n_paths=10000, horizon=get_settings().forecast_horizon_days
-    )
-    try:
-        baseline = forecaster.forecast(close_prices)
-    except ValueError as err:
-        return _failed(str(err))
-    return {"quant_baseline": asdict(baseline)}
+    return quant_baseline_node
+
+
+quant_baseline_node = make_quant_baseline_node()
 
 
 # ---------------------------------------------------------------------------
@@ -282,17 +336,21 @@ def build_predictor_prompt(
     key_points: list[str],
     risks: list[str],
     revision_guidance: Optional[str] = None,
+    prior_context: Optional[dict] = None,
 ) -> str:
     """Build the constrained predictor prompt.
 
     Numbers come from the quant baseline; the LLM may only propose bounded,
-    evidence-backed adjustments to them.
+    evidence-backed adjustments to them. ``prior_context`` (from the memory
+    loader) adds earlier forecasts, active lessons and the track record.
     """
     max_shift = _max_prob_shift()
     lines = [
         "You are a forecast predictor for an Indian NSE stock (educational use only).",
         "Start from the QUANT BASELINE and apply ONLY small, evidence-backed adjustments.",
         "Do not invent facts, override deterministic data, or narrow uncertainty dramatically.",
+        "Describe evidence and probabilities only; never phrase output as a buy, sell or hold "
+        "recommendation, price target or trading instruction.",
         "",
         "QUANT BASELINE:",
         json.dumps(quant_baseline, indent=2, default=str),
@@ -326,6 +384,8 @@ def build_predictor_prompt(
         lines.extend(f"  - {r}" for r in risks)
         lines.append("")
 
+    lines += format_prior_context(prior_context)
+
     lines += [
         "CONSTRAINTS:",
         f"- MAX_PROB_SHIFT = {max_shift} (per-probability change vs the baseline)",
@@ -341,6 +401,49 @@ def build_predictor_prompt(
         lines += ["", "REVISION REQUIRED - fix these critic findings:", revision_guidance]
 
     return "\n".join(lines)
+
+
+def format_prior_context(prior_context: Optional[dict]) -> list[str]:
+    """Prompt lines for memory context; empty when there is nothing to show."""
+    if not prior_context:
+        return []
+    ctx = MemoryContext.model_validate(prior_context)
+    track = ctx.track_record
+    if not ctx.has_content and not (track and track.forecasts_made):
+        return []
+
+    lines = [
+        "PRIOR CONTEXT (from earlier runs; background only, not evidence about this week):"
+    ]
+    for f in ctx.prior_forecasts:
+        lines.append(
+            f"  Previous forecast as of {f.as_of_date} for {f.target_date}: regime {f.market_regime}, "
+            f"P(up) {f.prob_up:.3f}, P(down) {f.prob_down:.3f}, "
+            f"P10/P50/P90 {f.p10_price:.2f}/{f.p50_price:.2f}/{f.p90_price:.2f}, "
+            f"adjustment applied: {'yes' if f.adjustment_applied else 'no'}"
+        )
+    if ctx.active_lessons:
+        lines.append("  Active lessons (cite as evidence_refs 'lesson:<id>' only if relevant):")
+        lines.extend(
+            f"    - lesson:{lesson.lesson_id} [{lesson.scope}, {lesson.evidence_count} confirmations] "
+            f"{lesson.text}"
+            for lesson in ctx.active_lessons
+        )
+    if track:
+        lines.append(
+            f"  Track record: earlier forecasts {track.forecasts_made}; "
+            f"past their target date {track.forecasts_awaiting_outcome}; "
+            + (
+                "none scored against actual prices yet."
+                if track.outcome_metrics is None
+                else f"outcome metrics {json.dumps(track.outcome_metrics, sort_keys=True)}."
+            )
+        )
+    lines += [
+        "  Do not treat a previous forecast as evidence; it only shows what was predicted before.",
+        "",
+    ]
+    return lines
 
 
 def _quant_as_predictor_result(quant: dict, reasoning: str) -> dict:
@@ -390,6 +493,7 @@ def make_predictor_node(llm_factory=None) -> Callable[[GraphState], dict]:
             key_points=_dedupe([k for r in reports for k in r.get("key_points", [])]),
             risks=_dedupe([x for r in reports for x in r.get("risks", [])]),
             revision_guidance=guidance,
+            prior_context=state.memory_context,
         )
 
         try:
@@ -627,17 +731,130 @@ def join_node(state: GraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Forecast snapshot node (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+def make_snapshot_node(
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+) -> Callable[[GraphState], dict]:
+    """Snapshot the completed forecast, persist it if a store is given, render the report.
+
+    Without a store the snapshot is still built and validated (and the report
+    rendered), but ``snapshot_persisted`` stays False.
+    """
+
+    def snapshot_node(state: GraphState) -> dict:
+        try:
+            snapshot = build_forecast_snapshot(state)
+        except SnapshotNotReadyError as err:
+            logger.warning("forecast_snapshot_skipped", symbol=state.symbol, reason=str(err))
+            return {}
+
+        report = render_forecast_report(snapshot)
+        if snapshot_store is not None:
+            snapshot_store.save(snapshot)
+        return {
+            "forecast_id": snapshot.forecast_id,
+            "data_snapshot_id": snapshot.data_snapshot_id,
+            "snapshot_persisted": snapshot_store is not None,
+            "forecast_report": report,
+        }
+
+    return snapshot_node
+
+
+# ---------------------------------------------------------------------------
+# Memory nodes (Plan.md Phase 7)
+# ---------------------------------------------------------------------------
+
+
+def make_memory_loader_node(
+    memory_store: Optional[MemoryStore] = None,
+) -> Callable[[GraphState], dict]:
+    """Load prior insights, active lessons and the track record for the ticker.
+
+    Without a store memory is not configured and ``memory_context`` stays None.
+    A failing store never blocks the forecast: the run continues with an
+    empty context that records the error.
+    """
+
+    def memory_loader_node(state: GraphState) -> dict:
+        if memory_store is None:
+            return {}
+        settings = get_settings()
+        now = datetime.now(UTC)
+        sector = (state.fundamentals_summary or {}).get("sector")
+        try:
+            context = MemoryContext(
+                loaded=True,
+                prior_forecasts=memory_store.recent_insights(
+                    state.symbol, before=now, limit=settings.memory_max_prior_forecasts
+                ),
+                active_lessons=memory_store.active_lessons(
+                    state.symbol,
+                    sector if isinstance(sector, str) else None,
+                    as_of=now,
+                    limit=settings.max_active_lessons_in_prompt,
+                ),
+                track_record=memory_store.track_record(
+                    state.symbol, before=now, as_of_date=now.astimezone(IST).date()
+                ),
+            )
+        except (MemoryStoreError, sqlite3.Error, ValidationError) as err:
+            logger.warning("memory_load_failed", symbol=state.symbol, error=str(err))
+            context = MemoryContext(loaded=False, error=str(err)[:500])
+        return {"memory_context": context.model_dump(mode="json")}
+
+    return memory_loader_node
+
+
+def make_memory_writer_node(
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+    memory_store: Optional[MemoryStore] = None,
+) -> Callable[[GraphState], dict]:
+    """Store a distilled insight for the persisted forecast so later runs can see it.
+
+    Memory is auxiliary: a failed write is logged and reported in
+    ``memory_written`` but never undoes the already-stored forecast.
+    """
+
+    def memory_writer_node(state: GraphState) -> dict:
+        if (
+            memory_store is None
+            or snapshot_store is None
+            or not state.snapshot_persisted
+            or state.forecast_id is None
+        ):
+            return {}
+        try:
+            snapshot = snapshot_store.get(state.forecast_id)
+            if snapshot is None:
+                raise MemoryStoreError(f"Forecast {state.forecast_id} is not stored")
+            memory_store.save_insight(ForecastInsight.from_snapshot(snapshot))
+        except (MemoryStoreError, ForecastSnapshotError, sqlite3.Error) as err:
+            logger.warning("memory_write_failed", forecast_id=state.forecast_id, error=str(err))
+            return {"memory_written": False}
+        return {"memory_written": True}
+
+    return memory_writer_node
+
+
+# ---------------------------------------------------------------------------
 # LangGraph workflow construction
 # ---------------------------------------------------------------------------
 
 
 def build_workflow(
     llm_factory=None,
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+    memory_store: Optional[MemoryStore] = None,
 ) -> StateGraph:
     """Build the LangGraph workflow.
 
     Topology:
-        mark_collectors
+        memory_loader (prior context when ``memory_store`` is given)
+          → mark_collectors
           → parallel analysts (technical, fundamental, sentiment, context)
           → guardrails
           → decision_engine
@@ -645,40 +862,47 @@ def build_workflow(
           → adjustment_gate
           → predictor → critic → revision ─┬→ predictor (revise, bounded)
                                            └→ final_forecast
-          → join → END
+          → join
+          → forecast_snapshot (persisted when ``snapshot_store`` is given)
+          → memory_writer (insight stored when both stores are given) → END
     """
     factory = get_llm_factory() if llm_factory is None else llm_factory
 
     workflow = StateGraph(GraphState)
 
+    workflow.add_node("memory_loader", make_memory_loader_node(memory_store))
+    workflow.set_entry_point("memory_loader")
+
     # Collectors are pre-loaded into state; this node only marks them complete
     workflow.add_node("mark_collectors", lambda state: {"collectors_complete": True})
-    workflow.set_entry_point("mark_collectors")
+    workflow.add_edge("memory_loader", "mark_collectors")
 
     analysts = {
-        "technical_analyst": (AnalystType.TECHNICAL, "technical_analyst.txt"),
-        "fundamental_analyst": (AnalystType.FUNDAMENTAL, "fundamental_analyst.txt"),
-        "sentiment_analyst": (AnalystType.SENTIMENT, "sentiment_analyst.txt"),
-        "context_analyst": (AnalystType.CONTEXT, "context_analyst.txt"),
+        "technical_analyst": AnalystType.TECHNICAL,
+        "fundamental_analyst": AnalystType.FUNDAMENTAL,
+        "sentiment_analyst": AnalystType.SENTIMENT,
+        "context_analyst": AnalystType.CONTEXT,
     }
-    prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
-    for node_name, (analyst_type, prompt_file) in analysts.items():
+    for node_name, analyst_type in analysts.items():
+        prompt_path = PROMPTS_DIR / ANALYST_PROMPT_FILES[node_name]
         workflow.add_node(
             node_name,
-            make_analyst_node(analyst_type, str(prompts_dir / prompt_file), factory),
+            make_analyst_node(analyst_type, str(prompt_path), factory),
         )
         workflow.add_edge("mark_collectors", node_name)
         workflow.add_edge(node_name, "guardrails")
 
     workflow.add_node("guardrails", make_guardrail_node())
     workflow.add_node("decision_engine", make_decision_engine_node())
-    workflow.add_node("quant_baseline", quant_baseline_node)
+    workflow.add_node("quant_baseline", make_quant_baseline_node(snapshot_store))
     workflow.add_node("adjustment_gate", adjustment_gate_node)
     workflow.add_node("predictor", make_predictor_node(factory))
     workflow.add_node("critic", critic_node)
     workflow.add_node("revision", revision_node)
     workflow.add_node("final_forecast", final_forecast_node)
     workflow.add_node("join", join_node)
+    workflow.add_node("forecast_snapshot", make_snapshot_node(snapshot_store))
+    workflow.add_node("memory_writer", make_memory_writer_node(snapshot_store, memory_store))
 
     workflow.add_edge("guardrails", "decision_engine")
     workflow.add_edge("decision_engine", "quant_baseline")
@@ -692,7 +916,9 @@ def build_workflow(
         {"predictor": "predictor", "final_forecast": "final_forecast"},
     )
     workflow.add_edge("final_forecast", "join")
-    workflow.add_edge("join", END)
+    workflow.add_edge("join", "forecast_snapshot")
+    workflow.add_edge("forecast_snapshot", "memory_writer")
+    workflow.add_edge("memory_writer", END)
 
     return workflow
 
@@ -702,6 +928,15 @@ def build_workflow(
 # ---------------------------------------------------------------------------
 
 
-def compile_graph(llm_factory=None):
-    """Compile the LangGraph workflow."""
-    return build_workflow(llm_factory).compile()
+def compile_graph(
+    llm_factory=None,
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+    memory_store: Optional[MemoryStore] = None,
+):
+    """Compile the LangGraph workflow.
+
+    Snapshots and memory are persisted only when their stores are given;
+    production callers should use ``langgraph.runner.run_forecast``, which
+    always wires both.
+    """
+    return build_workflow(llm_factory, snapshot_store, memory_store).compile()

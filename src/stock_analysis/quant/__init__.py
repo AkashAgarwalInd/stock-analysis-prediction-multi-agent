@@ -1,4 +1,5 @@
 from stock_analysis.quant.forecast import (
+    DailyQuantiles,
     EWMAVolatility,
     HistoricalReturns,
     QuantBaseline,
@@ -8,6 +9,7 @@ from stock_analysis.quant.forecast import (
 )
 
 __all__ = [
+    "DailyQuantiles",
     "QuantBaseline",
     "QuantForecaster",
     "EWMAVolatility",

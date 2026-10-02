@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     max_revisions: int = 2
     predictor_max_prob_shift: float = 0.15
 
+    # Phase 7 memory (Plan.md §20, §47)
+    memory_max_prior_forecasts: int = 3
+    lesson_activation_min_evidence: int = 3
+    lesson_event_activation_min_evidence: int = 2
+    max_active_lessons_in_prompt: int = 5
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path}"

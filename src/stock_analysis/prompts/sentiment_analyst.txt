@@ -7,6 +7,7 @@ IMPORTANT RULES:
 - Return ONLY valid JSON matching the expected output schema
 - Explicitly identify any missing data fields
 - Do NOT invent or hallucinate facts
+- Describe evidence and probabilities only; never phrase output as a buy, sell or hold recommendation, price target or trading instruction
 
 INPUT: News sentiment data including article count, sentiment score, key themes, deduplication status, HTML-stripped titles/summaries, 14-day lookback.
 

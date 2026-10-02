@@ -105,6 +105,10 @@ class TradingCalendar:
     def get_trading_days_count(self, start: date, end: date) -> int:
         return len(self.get_trading_days(start, end))
 
+    def covers(self, dt: date) -> bool:
+        """Whether the holiday list extends to ``dt``'s year (later years may miss holidays)."""
+        return dt.year <= max(h.year for h in self._holidays)
+
     def is_weekend(self, dt: date) -> bool:
         return dt.weekday() in self._weekend_days
 

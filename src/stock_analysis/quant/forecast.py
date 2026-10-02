@@ -23,6 +23,18 @@ class QuantBaseline:
     method: str
 
 
+@dataclass(frozen=True)
+class DailyQuantiles:
+    """Distribution of the simulated price at one trading day of the horizon."""
+
+    day_index: int
+    predicted_return_pct: float
+    p10_price: float
+    p50_price: float
+    p90_price: float
+    prob_up: float
+
+
 class VolatilityModel(ABC):
     @abstractmethod
     def estimate(self, returns: NDArray[np.float64]) -> float:
@@ -121,6 +133,19 @@ class QuantForecaster:
         calibration_params: Optional[dict] = None,
         regime: Optional[str] = None,
     ) -> QuantBaseline:
+        return self.forecast_with_daily_path(prices, calibration_params, regime)[0]
+
+    def forecast_with_daily_path(
+        self,
+        prices: NDArray[np.float64],
+        calibration_params: Optional[dict] = None,
+        regime: Optional[str] = None,
+    ) -> tuple[QuantBaseline, list[DailyQuantiles]]:
+        """Return the endpoint baseline plus per-day quantiles from the same paths.
+
+        Both come from a single simulation, so the last daily entry matches the
+        endpoint baseline exactly.
+        """
         if len(prices) < 2:
             raise ValueError("Need at least 2 price points")
 
@@ -141,6 +166,11 @@ class QuantForecaster:
         )
 
         cumulative_returns = np.cumsum(paths, axis=1)
+        flat_threshold = self.flat_threshold_pct / 100.0
+        daily_path = [
+            self._daily_quantiles(day + 1, last_close, cumulative_returns[:, day], flat_threshold)
+            for day in range(cumulative_returns.shape[1])
+        ]
         final_log_returns = cumulative_returns[:, -1]
         final_prices = last_close * np.exp(final_log_returns)
 
@@ -151,7 +181,6 @@ class QuantForecaster:
         expected_return = float(np.mean(final_log_returns))
         expected_return_pct = (np.exp(expected_return) - 1) * 100
 
-        flat_threshold = self.flat_threshold_pct / 100.0
         p_up = float(np.mean(final_log_returns > flat_threshold))
         p_down = float(np.mean(final_log_returns < -flat_threshold))
         p_flat = 1.0 - p_up - p_down
@@ -170,4 +199,22 @@ class QuantForecaster:
             p90_price=p90,
             weekly_vol_pct=weekly_vol,
             method="ewma_monte_carlo",
+        ), daily_path
+
+    @staticmethod
+    def _daily_quantiles(
+        day_index: int,
+        last_close: float,
+        log_returns: NDArray[np.float64],
+        flat_threshold: float,
+    ) -> DailyQuantiles:
+        """Summarise the simulated cumulative log returns at one horizon day."""
+        prices = last_close * np.exp(log_returns)
+        return DailyQuantiles(
+            day_index=day_index,
+            predicted_return_pct=float((np.exp(np.mean(log_returns)) - 1) * 100),
+            p10_price=float(np.percentile(prices, 10)),
+            p50_price=float(np.percentile(prices, 50)),
+            p90_price=float(np.percentile(prices, 90)),
+            prob_up=float(np.mean(log_returns > flat_threshold)),
         )

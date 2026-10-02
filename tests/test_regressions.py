@@ -1,12 +1,13 @@
 """Regression tests for bugs found in the whole-repo gap audit."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from stock_analysis.data.cache import DataCache
 from stock_analysis.data.collector import _fundamentals_from_dict, _market_context_from_dict
 from stock_analysis.data.fundamentals import Fundamentals
 from stock_analysis.data.market_context import MarketContext
+from stock_analysis.data.news import NewsCollector
 from stock_analysis.database import Database
 from stock_analysis.guardrails import get_critical_gaps
 from stock_analysis.market.cache import PriceCache
@@ -117,6 +118,23 @@ def test_plain_string_gap_mentioning_required_does_not_block():
 def test_explicit_critical_gap_still_blocks():
     report = _report([{"description": "No price history", "severity": "critical"}])
     assert report.data_gaps[0].severity == DataGapSeverity.CRITICAL
+
+
+def test_lookback_converts_timezone_before_comparing():
+    """A +05:30 timestamp must not be read as if its wall clock were UTC."""
+    collector = NewsCollector(lookback_days=1)
+    ist = timezone(timedelta(hours=5, minutes=30))
+
+    # 2h old in real time, but naive-stripped it would look 7.5h in the future.
+    recent = datetime.now(UTC).astimezone(ist) - timedelta(hours=2)
+    assert collector._is_within_lookback(recent) is True
+
+    # 3 days old: outside the 1-day window regardless of representation.
+    assert collector._is_within_lookback(recent - timedelta(days=3)) is False
+
+
+def test_undated_article_is_not_treated_as_recent():
+    assert NewsCollector(lookback_days=14)._is_within_lookback(None) is False
 
 
 def test_get_critical_gaps_extracts_only_critical():

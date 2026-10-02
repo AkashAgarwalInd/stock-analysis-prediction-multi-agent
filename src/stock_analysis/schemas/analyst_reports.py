@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, validator
 
@@ -31,7 +31,7 @@ class DecisionType(str, Enum):
 class MarketRegime(str, Enum):
     TRENDING_UP = "trending_up"
     TRENDING_DOWN = "trending_down"
-    SIDWAYS = "sideways"
+    SIDEWAYS = "sideways"
     HIGH_VOLATILITY = "high_volatility"
     LOW_VOLATILITY = "low_volatility"
     MARKET_STRESS = "market_stress"
@@ -135,10 +135,11 @@ class AnalystReport(BaseModel):
         normalized = []
         for i, gap in enumerate(v):
             if isinstance(gap, str):
-                # Convert string to DataGap with inferred severity
-                severity = DataGapSeverity.MEDIUM
+                # Only the literal word "critical" blocks a run from a plain string;
+                # broader keywords ("required", "no data") flagged almost every gap.
                 lower_gap = gap.lower()
-                if any(kw in lower_gap for kw in ["critical", "essential", "required", "missing price", "no data"]):
+                severity = DataGapSeverity.MEDIUM
+                if "critical" in lower_gap:
                     severity = DataGapSeverity.CRITICAL
                 elif any(kw in lower_gap for kw in ["limited", "incomplete", "partial"]):
                     severity = DataGapSeverity.HIGH
@@ -225,7 +226,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
         options: dict | None = None,
     ) -> DecisionResult:
         """Classify decision using deterministic rules from analyst reports."""
-        
+
         # Handle string decision_type for backward compatibility
         if isinstance(decision_type, str):
             try:
@@ -234,7 +235,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
                 # Invalid decision type - degrade gracefully
                 return DecisionResult(
                     decision_type=DecisionType.MARKET_REGIME,
-                    result=MarketRegime.SIDWAYS.value,
+                    result=MarketRegime.SIDEWAYS.value,
                     confidence=0.0,
                     rationale=f"Unsupported decision type: {decision_type}",
                     model=self.name,
@@ -287,7 +288,7 @@ class RulesDecisionEngine(DecisionEngineInterface):
                     result = MarketRegime.HIGH_VOLATILITY.value
                     rationale = "High-confidence extreme stance detected"
                 else:
-                    result = MarketRegime.SIDWAYS.value
+                    result = MarketRegime.SIDEWAYS.value
                     rationale = "Mixed/neutral consensus"
 
             elif decision_type == DecisionType.RISK_CATEGORY:
@@ -375,13 +376,13 @@ class RulesDecisionEngine(DecisionEngineInterface):
                 primary_confidence = 0.7  # Fixed confidence for gate decision
 
             else:
-                result = MarketRegime.SIDWAYS.value
+                result = MarketRegime.SIDEWAYS.value
                 rationale = f"Unsupported decision type: {decision_type}"
                 primary_confidence = 0.0
 
         except (ValueError, Exception):
             # Unsupported decision type or other error - degrade gracefully
-            result = MarketRegime.SIDWAYS.value
+            result = MarketRegime.SIDEWAYS.value
             rationale = f"Unsupported decision type: {decision_type}"
             primary_confidence = 0.0
             decision_type = DecisionType.MARKET_REGIME  # use valid enum for pydantic
@@ -391,69 +392,6 @@ class RulesDecisionEngine(DecisionEngineInterface):
             result=result,
             confidence=primary_confidence,
             rationale=rationale,
-            model=self.name,
-            model_version="0.1.0",
-        )
-
-    def classify_market_regime(
-        self,
-        reports: list[dict],
-    ) -> tuple[str, str]:
-        """Convenience: classify market regime from analyst reports.
-
-        Returns (regime_string, rationale).
-        """
-        return self.decide(
-            DecisionType.MARKET_REGIME,
-            {"analyst_reports": reports},
-        ).model_dump().values()
-
-
-class JevDecisionEngine(DecisionEngineInterface):
-    """Decision engine using Jev provider.
-
-    Placeholder - not fully implemented for Phase 5.
-    """
-
-    name: str = "jev"
-
-    def decide(
-        self,
-        decision_type: DecisionType,
-        context: dict,
-        options: dict | None = None,
-    ) -> DecisionResult:
-        # Placeholder: degrade gracefully
-        return DecisionResult(
-            decision_type=decision_type,
-            result="not_implemented",
-            confidence=0.0,
-            rationale="JevDecisionEngine not configured for Phase 5",
-            model=self.name,
-            model_version="0.1.0",
-        )
-
-
-class LayaDecisionEngine(DecisionEngineInterface):
-    """Decision engine using Laya provider.
-
-    Placeholder - not fully implemented for Phase 5.
-    """
-
-    name: str = "laya"
-
-    def decide(
-        self,
-        decision_type: DecisionType,
-        context: dict,
-        options: dict | None = None,
-    ) -> DecisionResult:
-        # Placeholder: degrade gracefully
-        return DecisionResult(
-            decision_type=decision_type,
-            result="not_implemented",
-            confidence=0.0,
-            rationale="LayaDecisionEngine not configured for Phase 5",
             model=self.name,
             model_version="0.1.0",
         )

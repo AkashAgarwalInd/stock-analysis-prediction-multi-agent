@@ -8,17 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from stock_analysis.schemas.analyst_reports import (
     AnalystReport,
     AnalystStance,
     AnalystType,
-    DataGap,
     DataGapSeverity,
-    DecisionType,
-    MarketRegime,
-    RiskCategory,
 )
 from stock_analysis.schemas.graph_state import GraphState
 
@@ -89,6 +85,38 @@ def validate_all_reports_present(state: GraphState) -> GuardrailResult:
     return result
 
 
+def get_critical_gaps(reports: List[Optional[dict[str, Any]]]) -> List[dict[str, Any]]:
+    """Extract CRITICAL data gaps from raw analyst report dicts.
+
+    The single place this extraction lives: ``validate_no_critical_data_gaps``
+    uses it for preflight, and later phases (postmortem, snapshot audit) can
+    reuse it rather than re-deriving severity. Reports that fail
+    ``AnalystReport`` validation are skipped, matching the preflight contract
+    that a bad report is reported as missing rather than raising here.
+
+    ``AnalystReport.data_gaps`` is typed ``List[DataGap]`` and its ``pre=True``
+    validator normalizes strings and dicts, so gaps are always ``DataGap``
+    objects by this point -- severity needs no defensive branching.
+    """
+    critical: List[dict[str, Any]] = []
+    for report in reports:
+        if report is None:
+            continue
+        try:
+            analyst_report = AnalystReport(**report)
+        except Exception:
+            continue
+        for gap in analyst_report.data_gaps:
+            if gap.severity == DataGapSeverity.CRITICAL:
+                critical.append(
+                    {
+                        "analyst": analyst_report.analyst.value,
+                        "description": gap.description,
+                    }
+                )
+    return critical
+
+
 def validate_no_critical_data_gaps(state: GraphState) -> GuardrailResult:
     """Validate no unaddressed critical data gaps exist across all reports."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
@@ -98,26 +126,7 @@ def validate_no_critical_data_gaps(state: GraphState) -> GuardrailResult:
         state.sentiment_report,
         state.context_report,
     ]
-    critical_gaps = []
-    for report in reports:
-        if report is None:
-            continue
-        try:
-            analyst_report = AnalystReport(**report)
-            for gap in analyst_report.data_gaps:
-                if isinstance(gap, dict):
-                    severity = gap.get("severity", "medium")
-                elif isinstance(gap, DataGap):
-                    severity = gap.severity.value
-                else:
-                    severity = "medium"
-                if severity == DataGapSeverity.CRITICAL.value:
-                    critical_gaps.append({
-                        "analyst": analyst_report.analyst.value,
-                        "description": gap.get("description") if isinstance(gap, dict) else gap.description,
-                    })
-        except Exception:
-            continue
+    critical_gaps = get_critical_gaps(reports)
     if critical_gaps:
         result.add_violation(GuardrailViolation(
             violation_type=GuardrailViolationType.CRITICAL_DATA_GAPS,
@@ -308,42 +317,3 @@ def run_preflight_guardrails(state: GraphState) -> GuardrailResult:
 # ---------------------------------------------------------------------------
 # Data gap utilities
 # ---------------------------------------------------------------------------
-
-def normalize_data_gaps(gaps: List) -> List[DataGap]:
-    """Normalize data gaps to DataGap objects."""
-    normalized = []
-    for gap in gaps:
-        if isinstance(gap, DataGap):
-            normalized.append(gap)
-        elif isinstance(gap, dict):
-            normalized.append(DataGap(**gap))
-        elif isinstance(gap, str):
-            # Try to infer severity from keywords
-            severity = DataGapSeverity.MEDIUM
-            lower_gap = gap.lower()
-            if any(kw in lower_gap for kw in ["critical", "essential", "required", "missing price", "no data"]):
-                severity = DataGapSeverity.CRITICAL
-            elif any(kw in lower_gap for kw in ["limited", "incomplete", "partial"]):
-                severity = DataGapSeverity.HIGH
-            normalized.append(DataGap(description=gap, severity=severity))
-    return normalized
-
-
-def get_critical_gaps(reports: List[dict]) -> List[dict]:
-    """Extract critical data gaps from analyst reports."""
-    critical = []
-    for report in reports:
-        if report is None:
-            continue
-        try:
-            analyst_report = AnalystReport(**report)
-            for gap in analyst_report.data_gaps:
-                severity = gap.severity if isinstance(gap, DataGap) else gap.get("severity", "medium")
-                if severity == DataGapSeverity.CRITICAL:
-                    critical.append({
-                        "analyst": analyst_report.analyst.value,
-                        "description": gap.description if isinstance(gap, DataGap) else gap.get("description", str(gap)),
-                    })
-        except Exception:
-            continue
-    return critical

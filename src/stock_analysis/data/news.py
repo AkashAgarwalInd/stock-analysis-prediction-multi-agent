@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 import feedparser
@@ -74,11 +74,18 @@ class NewsCollector:
         return None
 
     def _is_within_lookback(self, published_at: Optional[datetime]) -> bool:
+        """True if ``published_at`` falls inside the lookback window.
+
+        An undated article is excluded rather than assumed recent: callers must
+        not treat an unknown date as fresh.
+        """
         if published_at is None:
-            return True
+            return False
         cutoff = datetime.utcnow() - timedelta(days=self.lookback_days)
         if published_at.tzinfo is not None:
-            published_at = published_at.replace(tzinfo=None)
+            # Convert to UTC before dropping tzinfo. A bare replace() would read
+            # 15:00+05:30 as 15:00 UTC -- a 5.5h error at the window boundary.
+            published_at = published_at.astimezone(UTC).replace(tzinfo=None)
         return published_at >= cutoff
 
     def _clean_summary(self, summary: str) -> str:
@@ -100,7 +107,6 @@ class NewsCollector:
         query = self._build_query(symbol)
         params = {"q": query, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"}
 
-        cutoff = datetime.utcnow() - timedelta(days=self.lookback_days)
         items: list[NewsItem] = []
 
         for attempt in range(self.max_retries):
@@ -110,9 +116,15 @@ class NewsCollector:
                 response.raise_for_status()
 
                 feed = feedparser.parse(response.text)
+                undated = 0
 
                 for entry in feed.entries:
                     published = self._parse_rss_date(entry.get("published", ""))
+                    if published is None:
+                        # Logged below: a feed-format change would otherwise
+                        # silently drop every article.
+                        undated += 1
+                        continue
                     if not self._is_within_lookback(published):
                         continue
 
@@ -127,13 +139,17 @@ class NewsCollector:
                                 title=title,
                                 url=url,
                                 source=source,
-                                published_at=published or datetime.utcnow(),
+                                published_at=published,
                                 summary=summary,
                                 symbol=symbol,
                             )
                         )
 
                 items = self._deduplicate(items)
+                if undated:
+                    logger.warning(
+                        "news_entries_unparseable_date", symbol=symbol, skipped=undated
+                    )
                 logger.info("news_collected", symbol=symbol, count=len(items))
                 return NewsCollection(symbol=symbol, items=items)
 

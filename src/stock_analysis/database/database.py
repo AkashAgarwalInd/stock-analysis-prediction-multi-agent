@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Union
+from typing import Any, Generator, Union
 
 from stock_analysis.config import get_settings
 from stock_analysis.logging import get_logger
@@ -15,6 +15,7 @@ class Database:
         self.echo = echo
         self._conn: sqlite3.Connection | None = None
         self._is_memory = str(self.path) == ":memory:"
+        self._in_txn = False
 
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -42,31 +43,45 @@ class Database:
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Connection, None, None]:
         conn = self.connect()
+        self._in_txn = True
         try:
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+        finally:
+            self._in_txn = False
 
-    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+    def _commit_if_write(self, conn: sqlite3.Connection) -> None:
+        """Commit any implicit transaction opened by an INSERT/UPDATE/DELETE.
+
+        Skipped inside ``transaction()`` so multi-statement units stay atomic.
+        """
+        if conn.in_transaction and not self._in_txn:
+            conn.commit()
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
         conn = self.connect()
         cursor = conn.execute(query, params)
+        self._commit_if_write(conn)
         if self.echo:
             logger.debug("sql_executed", query=query, params=params)
         return cursor
 
-    def executemany(self, query: str, params_list: list[tuple]) -> sqlite3.Cursor:
+    def executemany(self, query: str, params_list: list[tuple[Any, ...]]) -> sqlite3.Cursor:
         conn = self.connect()
         cursor = conn.executemany(query, params_list)
+        self._commit_if_write(conn)
         if self.echo:
             logger.debug("sql_executemany", query=query, count=len(params_list))
         return cursor
 
-    def fetchone(self, query: str, params: tuple = ()) -> sqlite3.Row | None:
-        return self.execute(query, params).fetchone()
+    def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self.execute(query, params).fetchone()
+        return row
 
-    def fetchall(self, query: str, params: tuple = ()) -> list[sqlite3.Row]:
+    def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return self.execute(query, params).fetchall()
 
 

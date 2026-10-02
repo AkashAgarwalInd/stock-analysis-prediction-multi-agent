@@ -1,79 +1,88 @@
-import logging
-from enum import Enum
+import json
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from stock_analysis.config import get_settings
+from stock_analysis.llm.models import LLMModel, LLMResponse
+from stock_analysis.logging import get_logger
 
-T = TypeVar("T", bound=Any)
+logger = get_logger(__name__)
 
+T = TypeVar("T", bound=BaseModel)
 
-class LLMModel(str, Enum):
-    PRIMARY = "primary"
-    CRITIC = "critic"
-    FALLBACK = "fallback"
-
-
-class LLMResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    content: str
-    model: str
-    usage: dict[str, Any] | None = None
-    metadata: dict[str, Any] = {}
+__all__ = ["LLMFactory", "LLMModel", "LLMResponse", "get_llm", "get_llm_factory"]
 
 
 class LLMFactory:
-    _instance: "LLMFactory | None" = None
+    """Creates Gemini models per role and runs structured / text generation."""
 
-    def __init__(self):
-        self._settings = None
+    def __init__(self) -> None:
         self._models: dict[LLMModel, Any] = {}
         self._initialized = False
 
     def initialize(self) -> None:
+        """Build one Gemini model per role. A no-op until an API key is configured."""
         if self._initialized:
             return
 
-        try:
-            from stock_analysis.config import get_settings
-            self._settings = get_settings()
-        except Exception:
-            self._settings = None
-
-        if not self._settings or not self._settings.gemini_api_key:
+        settings = get_settings()
+        if not settings.gemini_api_key:
             logger.warning("gemini_api_key_not_set")
-            self._initialized = True
             return
 
         import google.generativeai as genai
 
-        genai.configure(api_key=self._settings.gemini_api_key)
-
-        self._models[LLMModel.PRIMARY] = genai.GenerativeModel(
-            self._settings.gemini_model_primary
-        )
-        self._models[LLMModel.CRITIC] = genai.GenerativeModel(
-            self._settings.gemini_model_critic
-        )
-        self._models[LLMModel.FALLBACK] = genai.GenerativeModel(
-            self._settings.gemini_model_fallback
-        )
-
+        genai.configure(api_key=settings.gemini_api_key)
+        self._models = {
+            LLMModel.PRIMARY: genai.GenerativeModel(settings.gemini_model_primary),
+            LLMModel.CRITIC: genai.GenerativeModel(settings.gemini_model_critic),
+            LLMModel.FALLBACK: genai.GenerativeModel(settings.gemini_model_fallback),
+        }
         self._initialized = True
-        logger.info("llm_factory_initialized", extra={"models": list(self._models.keys())})
+        logger.info("llm_factory_initialized", roles=[r.value for r in self._models])
 
     def get_model(self, role: LLMModel) -> Any:
-        if not self._initialized:
-            self.initialize()
-
-        if role not in self._models:
-            if not self._settings or not self._settings.gemini_api_key:
-                raise RuntimeError("Gemini API key not configured")
-            raise ValueError(f"Unknown model role: {role}")
-
+        """Return the Gemini model for ``role``; raises if no API key is configured."""
+        self.initialize()
+        if not self._models:
+            raise RuntimeError("Gemini API key not configured")
         return self._models[role]
+
+    @staticmethod
+    def _generation_config(
+        temperature: float | None, max_tokens: int | None, json_mode: bool
+    ) -> Any:
+        import google.generativeai as genai
+
+        settings = get_settings()
+        kwargs: dict[str, Any] = {
+            "temperature": settings.gemini_temperature if temperature is None else temperature,
+            "max_output_tokens": settings.gemini_max_tokens if max_tokens is None else max_tokens,
+        }
+        if json_mode:
+            kwargs["response_mime_type"] = "application/json"
+        return genai.GenerationConfig(**kwargs)
+
+    def _generate(
+        self,
+        role: LLMModel,
+        prompt: str,
+        temperature: float | None,
+        max_tokens: int | None,
+        json_mode: bool,
+    ) -> tuple[Any, Any]:
+        """Call the model for ``role``; on an API error retry once on the FALLBACK model."""
+        config = self._generation_config(temperature, max_tokens, json_mode)
+        model = self.get_model(role)
+        try:
+            return model, model.generate_content(prompt, generation_config=config)
+        except Exception as exc:  # SDK raises many unrelated error types
+            if role == LLMModel.FALLBACK:
+                raise
+            logger.warning("llm_call_failed_using_fallback", role=role.value, error=str(exc))
+            fallback = self.get_model(LLMModel.FALLBACK)
+            return fallback, fallback.generate_content(prompt, generation_config=config)
 
     def generate_structured(
         self,
@@ -83,50 +92,21 @@ class LLMFactory:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> T:
-        try:
-            model = self.get_model(role)
-        except RuntimeError:
-            raise
+        """Generate JSON and validate it against ``response_schema``.
 
-        try:
-            from google.generativeai.types import GenerateContentConfig
-        except ImportError:
-            GenerateContentConfig = None
+        The schema is appended to the prompt instead of passed as Gemini's
+        ``response_schema`` because the SDK rejects free-form ``dict`` fields.
+        Schema violations surface as ``pydantic.ValidationError``.
+        """
+        schema = json.dumps(response_schema.model_json_schema())
+        full_prompt = f"{prompt}\n\nRespond with JSON only, matching this JSON schema:\n{schema}"
+        logger.debug("llm_generate_structured", role=role.value)
 
-        config_kwargs: dict[str, Any] = {}
-        if GenerateContentConfig is not None:
-            config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_schema"] = response_schema
-
-        if temperature is not None:
-            config_kwargs["temperature"] = temperature
-        else:
-            try:
-                from stock_analysis.config import get_settings
-                config_kwargs["temperature"] = get_settings().gemini_temperature
-            except Exception:
-                config_kwargs["temperature"] = 0.1
-
-        if max_tokens is not None:
-            config_kwargs["max_output_tokens"] = max_tokens
-        else:
-            try:
-                from stock_analysis.config import get_settings
-                config_kwargs["max_output_tokens"] = get_settings().gemini_max_tokens
-            except Exception:
-                config_kwargs["max_output_tokens"] = 8192
-
-        logger.debug("llm_generate_structured", extra={"role": role.value})
-
-        if GenerateContentConfig is not None:
-            response = model.generate_content(prompt, generation_config=GenerateContentConfig(**config_kwargs))
-        else:
-            response = model.generate_content(prompt)
-
-        if getattr(response, "text", None) is None:
+        _, response = self._generate(role, full_prompt, temperature, max_tokens, json_mode=True)
+        text = getattr(response, "text", None)
+        if not text:
             raise RuntimeError("LLM returned empty response")
-
-        return response_schema.model_validate_json(response.text)
+        return response_schema.model_validate_json(text)
 
     def generate_text(
         self,
@@ -135,53 +115,24 @@ class LLMFactory:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
+        """Generate plain text. Returns an empty response when no API key is configured."""
         try:
-            model = self.get_model(role)
+            self.get_model(role)
         except RuntimeError:
             return LLMResponse(content="", model="", usage={})
 
-        try:
-            from google.generativeai.types import GenerateContentConfig
-        except ImportError:
-            GenerateContentConfig = None
+        logger.debug("llm_generate_text", role=role.value)
+        model, response = self._generate(role, prompt, temperature, max_tokens, json_mode=False)
 
-        config_kwargs: dict[str, Any] = {}
-        if GenerateContentConfig is not None:
-            config_kwargs["response_mime_type"] = "application/json"
-
-        if temperature is not None:
-            config_kwargs["temperature"] = temperature
-        else:
-            try:
-                from stock_analysis.config import get_settings
-                config_kwargs["temperature"] = get_settings().gemini_temperature
-            except Exception:
-                config_kwargs["temperature"] = 0.1
-
-        if max_tokens is not None:
-            config_kwargs["max_output_tokens"] = max_tokens
-        else:
-            try:
-                from stock_analysis.config import get_settings
-                config_kwargs["max_output_tokens"] = get_settings().gemini_max_tokens
-            except Exception:
-                config_kwargs["max_output_tokens"] = 8192
-
-        logger.debug("llm_generate_text", extra={"role": role.value})
-
-        if GenerateContentConfig is not None:
-            response = model.generate_content(prompt, generation_config=GenerateContentConfig(**config_kwargs))
-        else:
-            response = model.generate_content(prompt)
-
+        usage = getattr(response, "usage_metadata", None)
         return LLMResponse(
             content=response.text or "",
             model=getattr(model, "model_name", "unknown"),
             usage={
-                "prompt_tokens": getattr(getattr(response, "usage_metadata", None), "prompt_token_count", 0),
-                "completion_tokens": getattr(getattr(response, "usage_metadata", None), "candidates_token_count", 0),
+                "prompt_tokens": getattr(usage, "prompt_token_count", 0),
+                "completion_tokens": getattr(usage, "candidates_token_count", 0),
             }
-            if getattr(response, "usage_metadata", None)
+            if usage
             else None,
         )
 
@@ -199,5 +150,4 @@ def get_llm_factory() -> LLMFactory:
 
 def get_llm(role: LLMModel) -> Any:
     """Get an LLM model by role."""
-    factory = get_llm_factory()
-    return factory.get_model(role)
+    return get_llm_factory().get_model(role)

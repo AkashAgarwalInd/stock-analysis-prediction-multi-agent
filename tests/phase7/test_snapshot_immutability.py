@@ -5,7 +5,6 @@ import sqlite3
 from datetime import UTC, datetime
 
 import pytest
-from phase7_helpers import MADE_AT
 from pydantic import ValidationError
 
 from stock_analysis.database import (
@@ -22,6 +21,7 @@ from stock_analysis.schemas.analyst_reports import (
     RulesDecisionEngine,
 )
 from stock_analysis.snapshots import build_forecast_snapshot
+from tests.forecast_helpers import MADE_AT
 
 CORRECTED_AT = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
 

@@ -6,7 +6,6 @@ from datetime import date
 
 import numpy as np
 import pytest
-from phase7_helpers import MADE_AT, FakeLLM, run_graph
 from pydantic import ValidationError
 
 from stock_analysis.config.settings import get_settings
@@ -17,6 +16,7 @@ from stock_analysis.schemas.forecast_pipeline import FinalForecast, PredictorRes
 from stock_analysis.schemas.snapshot import ForecastSnapshot, compute_data_snapshot_id
 from stock_analysis.snapshots import SnapshotNotReadyError, build_forecast_snapshot
 from stock_analysis.versions import ANALYST_PROMPT_FILES, PREDICTOR_PROMPT_VERSION, PROMPTS_DIR
+from tests.forecast_helpers import MADE_AT, FakeLLM, run_graph
 
 
 class TestForecastPersistence:

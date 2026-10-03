@@ -3,13 +3,13 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from phase7_helpers import FakeLLM, run_graph
 
 from stock_analysis.database import Database, ForecastSnapshotStore, MemoryStore
 from stock_analysis.langgraph.runner import run_forecast
 from stock_analysis.langgraph.workflow import format_prior_context
 from stock_analysis.schemas.memory import LessonCandidate, LessonEvidenceKind, MemoryContext
 from stock_analysis.snapshots import find_unsupported_numbers
+from tests.forecast_helpers import FakeLLM, run_graph
 
 
 @pytest.mark.usefixtures("price_history")
@@ -47,7 +47,10 @@ class TestSecondRunReceivesPriorContext:
         )
         report = second.forecast_report
         assert f"Previous forecast `{first.forecast_id}`" in report
-        assert "Track record: earlier forecasts 1; past their target date 0" in report
+        assert (
+            "Track record: earlier forecasts 1; scored against actual prices 0; "
+            "awaiting evaluation 0."
+        ) in report
         assert find_unsupported_numbers(report, snapshot) == []
 
     def test_active_lesson_reaches_predictor_and_report(self, initial_state, store, memory_store):

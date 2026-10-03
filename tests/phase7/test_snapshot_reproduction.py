@@ -4,7 +4,6 @@ import sqlite3
 from dataclasses import asdict
 
 import pytest
-from phase7_helpers import MADE_AT, FakeLLM, run_graph
 
 from stock_analysis.database import SnapshotIntegrityError
 from stock_analysis.schemas.snapshot import PriceHistorySnapshot
@@ -13,6 +12,7 @@ from stock_analysis.snapshots import (
     build_forecast_snapshot,
     reproduce_quant_baseline,
 )
+from tests.forecast_helpers import MADE_AT, FakeLLM, run_graph
 
 
 @pytest.fixture

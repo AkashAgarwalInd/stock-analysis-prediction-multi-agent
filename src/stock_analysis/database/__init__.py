@@ -8,6 +8,7 @@ from .forecast_store import (
 )
 from .memory_store import MemoryStore, MemoryStoreError
 from .migrations import get_migration_status, run_migrations
+from .outcome_store import OutcomeStore, OutcomeStoreError
 
 __all__ = [
     "Database",
@@ -23,4 +24,6 @@ __all__ = [
     "SnapshotLineageError",
     "MemoryStore",
     "MemoryStoreError",
+    "OutcomeStore",
+    "OutcomeStoreError",
 ]

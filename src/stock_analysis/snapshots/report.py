@@ -131,14 +131,10 @@ def _prior_context_lines(memory: Optional[dict[str, Any]]) -> list[str]:
         lines.append("- No earlier forecasts or active lessons for this ticker.")
     track = context.track_record
     if track is not None:
-        scored = (
-            "none scored against actual prices yet"
-            if track.outcome_metrics is None
-            else "outcome metrics recorded"
-        )
         lines.append(
-            f"- Track record: earlier forecasts {track.forecasts_made}; past their target "
-            f"date {track.forecasts_awaiting_outcome}; {scored}."
+            f"- Track record: earlier forecasts {track.forecasts_made}; scored against actual "
+            f"prices {track.forecasts_scored}; awaiting evaluation "
+            f"{track.forecasts_awaiting_outcome}."
         )
     return lines
 

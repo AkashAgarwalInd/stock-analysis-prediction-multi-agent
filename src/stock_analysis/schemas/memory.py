@@ -143,15 +143,18 @@ def lesson_status(
 class TrackRecord(BaseModel):
     """What is known about this ticker's past forecasts.
 
-    ``outcome_metrics`` stays ``None`` until forecasts are scored against actual
-    prices; nothing here is estimated.
+    Counts only; nothing here is estimated. ``outcome_metrics`` is reserved for
+    rolling accuracy metrics (Plan.md §28) and stays ``None`` until they exist.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ticker: str
     forecasts_made: int = Field(ge=0)
-    forecasts_awaiting_outcome: int = Field(ge=0, description="Target date passed, not scored")
+    forecasts_scored: int = Field(default=0, ge=0)
+    forecasts_awaiting_outcome: int = Field(
+        ge=0, description="Target date passed, not yet evaluated"
+    )
     outcome_metrics: Optional[dict[str, Any]] = None
 
 

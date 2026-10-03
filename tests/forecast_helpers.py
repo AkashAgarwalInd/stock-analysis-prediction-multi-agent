@@ -1,4 +1,4 @@
-"""Phase 7 test helpers: fake LLMs, fixed timestamps and a graph runner."""
+"""Shared forecast test helpers: fake LLMs, fixed timestamps and a graph runner."""
 
 import json
 from datetime import UTC, date, datetime
@@ -9,7 +9,7 @@ from stock_analysis.schemas.analyst_reports import AnalystReport
 from stock_analysis.schemas.forecast_pipeline import PredictorResult
 from stock_analysis.schemas.graph_state import GraphState
 
-ALEMBIC_DIR = Path(__file__).resolve().parents[2] / "alembic"
+ALEMBIC_DIR = Path(__file__).resolve().parents[1] / "alembic"
 LAST_BAR = date(2026, 9, 29)  # Tuesday; 2026-10-02 (Gandhi Jayanti) is an NSE holiday
 MADE_AT = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 

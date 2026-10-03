@@ -32,7 +32,7 @@ from stock_analysis.schemas.snapshot import canonical_json
 
 logger = get_logger(__name__)
 
-_REQUIRED_TABLES = ("memory_insights", "lessons", "lesson_evidence")
+_REQUIRED_TABLES = ("memory_insights", "lessons", "lesson_evidence", "forecast_outcomes")
 _SCOPE_PRIORITY = {"ticker": 0, "sector": 1, "general": 2}
 
 
@@ -244,19 +244,23 @@ class MemoryStore:
     # -- track record -----------------------------------------------------
 
     def track_record(self, ticker: str, *, before: datetime, as_of_date: date) -> TrackRecord:
-        """Counts of original forecasts made before ``before``.
+        """Counts of original forecasts made, scored and awaiting evaluation before ``before``.
 
-        Outcome metrics stay empty until forecasts are scored against actual prices.
+        Only outcomes evaluated before the cutoff count, so the record is point-in-time.
         """
+        cutoff = _utc_iso(before)
         row = self.db.fetchone(
             "SELECT COUNT(*) AS made, "
-            "COALESCE(SUM(target_date < ?), 0) AS awaiting "
-            "FROM forecast_snapshots WHERE ticker = ? AND version = 1 "
-            "AND julianday(made_at) < julianday(?)",
-            (as_of_date.isoformat(), ticker, _utc_iso(before)),
+            "COALESCE(SUM(o.status = 'scored'), 0) AS scored, "
+            "COALESCE(SUM(s.target_date < ? AND o.forecast_id IS NULL), 0) AS awaiting "
+            "FROM forecast_snapshots s LEFT JOIN forecast_outcomes o "
+            "ON o.forecast_id = s.forecast_id AND julianday(o.evaluated_at) < julianday(?) "
+            "WHERE s.ticker = ? AND s.version = 1 AND julianday(s.made_at) < julianday(?)",
+            (as_of_date.isoformat(), cutoff, ticker, cutoff),
         )
         return TrackRecord(
             ticker=ticker,
             forecasts_made=row["made"] if row else 0,
+            forecasts_scored=row["scored"] if row else 0,
             forecasts_awaiting_outcome=row["awaiting"] if row else 0,
         )

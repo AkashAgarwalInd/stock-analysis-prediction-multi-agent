@@ -432,12 +432,8 @@ def format_prior_context(prior_context: Optional[dict]) -> list[str]:
     if track:
         lines.append(
             f"  Track record: earlier forecasts {track.forecasts_made}; "
-            f"past their target date {track.forecasts_awaiting_outcome}; "
-            + (
-                "none scored against actual prices yet."
-                if track.outcome_metrics is None
-                else f"outcome metrics {json.dumps(track.outcome_metrics, sort_keys=True)}."
-            )
+            f"scored against actual prices {track.forecasts_scored}; "
+            f"awaiting evaluation {track.forecasts_awaiting_outcome}."
         )
     lines += [
         "  Do not treat a previous forecast as evidence; it only shows what was predicted before.",

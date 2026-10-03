@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     lesson_event_activation_min_evidence: int = 2
     max_active_lessons_in_prompt: int = 5
 
+    # Plan.md Phase 9 outcome scoring (§14-16)
+    outcome_data_delay_minutes: int = 60  # wait after the 15:30 IST close for EOD data
+    outcome_max_wait_trading_days: int = 5  # missing prices this long after target -> invalid
+    outcome_max_daily_move_pct: float = 35.0  # larger moves suggest an unadjusted split/bonus
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path}"

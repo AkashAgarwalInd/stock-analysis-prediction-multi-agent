@@ -3,7 +3,6 @@
 from datetime import UTC, date, datetime
 
 import pytest
-from phase7_helpers import MADE_AT
 
 from stock_analysis.langgraph.workflow import build_predictor_prompt
 from stock_analysis.market.calendar import TradingCalendar
@@ -14,6 +13,7 @@ from stock_analysis.snapshots import (
 )
 from stock_analysis.snapshots.report import ADVICE_WORDING_NOTE, has_advice_wording
 from stock_analysis.versions import ANALYST_PROMPT_FILES, PROMPTS_DIR
+from tests.forecast_helpers import MADE_AT
 
 NO_ADVICE_RULE = "never phrase output as a buy, sell or hold recommendation"
 CORRECTED_AT = datetime(2026, 9, 30, tzinfo=UTC)

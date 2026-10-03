@@ -1,10 +1,20 @@
+from datetime import UTC, datetime
+from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from stock_analysis.config import get_settings
-from stock_analysis.database import close_database, init_database, run_migrations
+from stock_analysis.database import (
+    ForecastSnapshotStore,
+    OutcomeStore,
+    close_database,
+    init_database,
+    run_migrations,
+)
 from stock_analysis.logging import configure_logging, get_logger
+from stock_analysis.review import OutcomeReviewer, render_last_forecast_vs_actual
 
 app = typer.Typer(
     name="stock-analysis",
@@ -46,6 +56,29 @@ def migrate() -> None:
     console.print("[yellow]Running migrations...[/yellow]")
     run_migrations()
     console.print("[green]Migrations completed[/green]")
+
+
+@app.command()
+def review(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+) -> None:
+    """Score matured forecasts against actual prices and show last forecast vs actual."""
+    db = init_database()
+    try:
+        snapshots, outcomes = ForecastSnapshotStore(db), OutcomeStore(db)
+        snapshots.ensure_schema()
+        outcomes.ensure_schema()
+        results = OutcomeReviewer(snapshots, outcomes).review_matured(
+            datetime.now(UTC), ticker=ticker
+        )
+        if not results:
+            console.print("No matured forecasts awaiting evaluation.")
+        for outcome in results:
+            snapshot = snapshots.get(outcome.forecast_id)
+            if snapshot is not None:
+                console.print(render_last_forecast_vs_actual(snapshot, outcome), markup=False)
+    finally:
+        close_database()
 
 
 @app.command()

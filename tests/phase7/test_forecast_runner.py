@@ -1,7 +1,6 @@
 """Phase 7: the production runner persists every completed forecast."""
 
 import pytest
-from phase7_helpers import DownLLM, FakeLLM
 
 from stock_analysis.database import (
     ForecastSnapshotError,
@@ -11,6 +10,7 @@ from stock_analysis.database import (
 )
 from stock_analysis.langgraph.runner import run_forecast
 from stock_analysis.schemas.graph_state import GraphState
+from tests.forecast_helpers import DownLLM, FakeLLM
 
 
 @pytest.fixture

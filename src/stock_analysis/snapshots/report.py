@@ -139,6 +139,20 @@ def _prior_context_lines(memory: Optional[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _calibration_lines(snapshot: ForecastSnapshot) -> list[str]:
+    cal = snapshot.calibration
+    if cal is None:
+        return ["- Calibration: none applied (the uncalibrated quant model)"]
+    shadow = snapshot.shadow_baseline
+    return [
+        f"- Calibration v{cal.version}: volatility multiplier {cal.vol_multiplier:.2f}, "
+        f"P50 shift {_ret(cal.p50_bias_shift_pct)}",
+        f"- Before calibration (shadow forecast): P10 {_price(shadow['p10_price'])}, "
+        f"P50 {_price(shadow['p50_price'])}, P90 {_price(shadow['p90_price'])}; "
+        f"weekly volatility {shadow['weekly_vol_pct']:.2f}%",
+    ]
+
+
 def _render(snapshot: ForecastSnapshot) -> str:
     data = snapshot.model_dump(mode="json")
     final = snapshot.final_forecast
@@ -188,6 +202,7 @@ def _render(snapshot: ForecastSnapshot) -> str:
         f"- Price range: P10 {_price(quant['p10_price'])}, P50 {_price(quant['p50_price'])}, "
         f"P90 {_price(quant['p90_price'])}",
         f"- Weekly volatility: {quant['weekly_vol_pct']:.2f}%",
+        *_calibration_lines(snapshot),
         "",
         "## Decision-engine assessment",
         "",

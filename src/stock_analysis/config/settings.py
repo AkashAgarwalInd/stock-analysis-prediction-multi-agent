@@ -45,6 +45,19 @@ class Settings(BaseSettings):
     outcome_max_wait_trading_days: int = 5  # missing prices this long after target -> invalid
     outcome_max_daily_move_pct: float = 35.0  # larger moves suggest an unadjusted split/bonus
 
+    # Plan.md Phases 11-12: postmortem, lessons and bounded calibration (§18-23)
+    learning_enabled: bool = True  # False: calibration is computed but not applied to forecasts
+    postmortem_temperature: float = 0.2
+    lesson_stale_after_days: int = 120  # unconfirmed this long -> retired
+    calibration_min_samples: int = 8
+    calibration_shrinkage_k: int = 8  # weight n/(n+k) on the estimate, the rest on "no change"
+    calibration_window: int = 52  # most recent scored forecasts used per ticker
+    calibration_vol_multiplier_min: float = 0.8
+    calibration_vol_multiplier_max: float = 1.5
+    calibration_bias_max_shift_pct: float = 1.0
+    calibration_bias_min_t_stat: float = 2.0
+    calibration_bias_min_sign_agreement: float = 0.6
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path}"

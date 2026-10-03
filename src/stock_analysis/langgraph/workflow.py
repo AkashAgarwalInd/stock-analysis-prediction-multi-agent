@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from stock_analysis.config.settings import get_settings
 from stock_analysis.database.forecast_store import ForecastSnapshotError, ForecastSnapshotStore
+from stock_analysis.database.learning_store import LearningStore, LearningStoreError
 from stock_analysis.database.memory_store import MemoryStore, MemoryStoreError
 from stock_analysis.guardrails import run_preflight_guardrails
 from stock_analysis.llm.factory import LLMModel, get_llm_factory
@@ -244,13 +245,37 @@ def make_decision_engine_node() -> Callable[[GraphState], dict]:
 # ---------------------------------------------------------------------------
 
 
+def _load_calibration(
+    calibration_store: Optional[LearningStore], symbol: str
+) -> Optional[dict]:
+    """The ticker's latest calibration as applied params, or None (never blocks a forecast)."""
+    if calibration_store is None or not get_settings().learning_enabled:
+        return None
+    try:
+        params = calibration_store.latest_calibration(symbol, as_of=datetime.now(UTC))
+    except (LearningStoreError, sqlite3.Error, ValidationError) as err:
+        logger.warning("calibration_load_failed", symbol=symbol, error=str(err))
+        return None
+    if params is None:
+        return None
+    return {
+        "version": params.version,
+        "vol_multiplier": params.vol_multiplier,
+        "p50_bias_shift_pct": params.p50_bias_shift_pct,
+    }
+
+
 def make_quant_baseline_node(
     price_store: Optional[ForecastSnapshotStore] = None,
+    calibration_store: Optional[LearningStore] = None,
 ) -> Callable[[GraphState], dict]:
     """Quant baseline node; with ``price_store`` it also persists the exact close series.
 
     The stored series (content-addressed by ``history_sha256``) is what lets a
-    snapshot's baseline be reproduced later (``snapshots.reproduce``).
+    snapshot's baseline be reproduced later (``snapshots.reproduce``). With a
+    ``calibration_store`` the ticker's latest calibration is applied (unless
+    ``LEARNING_ENABLED`` is false); the uncalibrated baseline is always kept as
+    the shadow forecast.
     """
 
     def quant_baseline_node(state: GraphState) -> dict:
@@ -278,8 +303,15 @@ def make_quant_baseline_node(
         forecaster = QuantForecaster(
             seed=QUANT_SEED, n_paths=QUANT_N_PATHS, horizon=get_settings().forecast_horizon_days
         )
+        calibration = _load_calibration(calibration_store, state.symbol)
         try:
-            baseline, daily_path = forecaster.forecast_with_daily_path(close_prices)
+            uncalibrated, daily_path = forecaster.forecast_with_daily_path(close_prices)
+            baseline = uncalibrated
+            if calibration is not None:
+                # Same seed, same draws: the two baselines differ only by the calibration
+                baseline, daily_path = forecaster.forecast_with_daily_path(
+                    close_prices, calibration
+                )
         except ValueError as err:
             return _failed(str(err))
 
@@ -288,6 +320,8 @@ def make_quant_baseline_node(
             price_store.save_price_history(history)
         return {
             "quant_baseline": asdict(baseline),
+            "quant_baseline_uncalibrated": asdict(uncalibrated),
+            "calibration": calibration,
             "quant_daily_path": [asdict(d) for d in daily_path],
             "price_snapshot": history.fingerprint(),
         }
@@ -845,6 +879,7 @@ def build_workflow(
     llm_factory=None,
     snapshot_store: Optional[ForecastSnapshotStore] = None,
     memory_store: Optional[MemoryStore] = None,
+    learning_store: Optional[LearningStore] = None,
 ) -> StateGraph:
     """Build the LangGraph workflow.
 
@@ -854,7 +889,8 @@ def build_workflow(
           → parallel analysts (technical, fundamental, sentiment, context)
           → guardrails
           → decision_engine
-          → quant_baseline
+          → quant_baseline (calibrated when ``learning_store`` holds a calibration;
+                            the uncalibrated shadow baseline is always kept)
           → adjustment_gate
           → predictor → critic → revision ─┬→ predictor (revise, bounded)
                                            └→ final_forecast
@@ -890,7 +926,7 @@ def build_workflow(
 
     workflow.add_node("guardrails", make_guardrail_node())
     workflow.add_node("decision_engine", make_decision_engine_node())
-    workflow.add_node("quant_baseline", make_quant_baseline_node(snapshot_store))
+    workflow.add_node("quant_baseline", make_quant_baseline_node(snapshot_store, learning_store))
     workflow.add_node("adjustment_gate", adjustment_gate_node)
     workflow.add_node("predictor", make_predictor_node(factory))
     workflow.add_node("critic", critic_node)
@@ -928,11 +964,12 @@ def compile_graph(
     llm_factory=None,
     snapshot_store: Optional[ForecastSnapshotStore] = None,
     memory_store: Optional[MemoryStore] = None,
+    learning_store: Optional[LearningStore] = None,
 ):
     """Compile the LangGraph workflow.
 
-    Snapshots and memory are persisted only when their stores are given;
-    production callers should use ``langgraph.runner.run_forecast``, which
-    always wires both.
+    Snapshots, memory and calibration are used only when their stores are
+    given; production callers should use ``langgraph.runner.run_forecast``,
+    which always wires all three.
     """
-    return build_workflow(llm_factory, snapshot_store, memory_store).compile()
+    return build_workflow(llm_factory, snapshot_store, memory_store, learning_store).compile()

@@ -89,6 +89,7 @@ class DownLLM:
         raise RuntimeError("LLM unavailable")
 
 
-def run_graph(llm, initial_state, store=None, memory_store=None) -> GraphState:
+def run_graph(llm, initial_state, store=None, memory_store=None, learning_store=None) -> GraphState:
     """Invoke the full graph and return the final state as a ``GraphState``."""
-    return GraphState(**compile_graph(llm, store, memory_store).invoke(initial_state))
+    graph = compile_graph(llm, store, memory_store, learning_store)
+    return GraphState(**graph.invoke(initial_state))

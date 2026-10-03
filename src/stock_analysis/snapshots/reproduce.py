@@ -15,9 +15,11 @@ class ReproductionError(Exception):
 
 
 def reproduce_quant_baseline(
-    snapshot: ForecastSnapshot, store: ForecastSnapshotStore
+    snapshot: ForecastSnapshot, store: ForecastSnapshotStore, *, calibrated: bool = True
 ) -> tuple[QuantBaseline, list[DailyQuantiles]]:
     """Recompute the quant baseline and daily path for ``snapshot``.
+
+    With ``calibrated=False`` the uncalibrated shadow baseline is recomputed instead.
 
     Raises:
         ReproductionError: the price history was not stored, or the quant model
@@ -41,4 +43,9 @@ def reproduce_quant_baseline(
     forecaster = QuantForecaster(
         seed=QUANT_SEED, n_paths=QUANT_N_PATHS, horizon=snapshot.horizon_trading_days
     )
-    return forecaster.forecast_with_daily_path(np.array(history.close_values()))
+    params = (
+        snapshot.calibration.model_dump(exclude={"version"})
+        if calibrated and snapshot.calibration is not None
+        else None
+    )
+    return forecaster.forecast_with_daily_path(np.array(history.close_values()), params)

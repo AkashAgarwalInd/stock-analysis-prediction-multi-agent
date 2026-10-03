@@ -86,6 +86,18 @@ class ForecastOutcome(BaseModel):
     final_loss: Optional[float] = None
     llm_value_added: Optional[float] = None
     llm_value_added_pinball: Optional[float] = None
+    baseline_in_80pct_band: Optional[bool] = None
+
+    # Shadow forecast (Plan.md §23): the uncalibrated quant baseline on the same outcome.
+    # "baseline" above is the (possibly calibrated) quant baseline the predictor started from.
+    calibration_version: int = Field(default=0, ge=0)
+    uncalibrated_signed_error_pct: Optional[float] = None
+    uncalibrated_in_80pct_band: Optional[bool] = None
+    uncalibrated_brier: Optional[float] = None
+    uncalibrated_pinball: Optional[dict[str, float]] = None
+    uncalibrated_loss: Optional[float] = None
+    calibration_value_added: Optional[float] = None  # uncalibrated_loss - baseline_loss
+    calibration_value_added_pinball: Optional[float] = None
 
     analyst_hits: Optional[dict[str, bool]] = None
 

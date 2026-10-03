@@ -168,12 +168,17 @@ def test_cli_review_scores_matured_forecasts(adjusted_state, store, monkeypatch)
 
     close_database()
     try:
-        result = CliRunner().invoke(app, ["review"])
-        again = CliRunner().invoke(app, ["review"])
+        result = CliRunner().invoke(app, ["review", "--no-llm"])
+        again = CliRunner().invoke(app, ["review", "--no-llm"])
     finally:
         close_database()
 
     assert result.exit_code == 0, result.output
     assert "Last forecast vs actual" in result.output
     assert old.forecast_id in result.output
+    # the learning loop ran: postmortem, then calibration (unchanged after one forecast)
+    assert "## Postmortem" in result.output
+    assert "System adaptation: RELIANCE" in result.output
+    assert "No material change" in result.output
     assert "No matured forecasts awaiting evaluation." in again.output
+    assert "## Postmortem" not in again.output

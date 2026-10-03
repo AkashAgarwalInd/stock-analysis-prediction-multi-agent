@@ -21,7 +21,14 @@ logger = get_logger(__name__)
 
 _REQUIRED_TABLES = ("forecast_outcomes", "outcome_daily")
 _JSON_FIELDS = frozenset(
-    {"validity_checks", "corporate_actions", "pinball", "baseline_pinball", "analyst_hits"}
+    {
+        "validity_checks",
+        "corporate_actions",
+        "pinball",
+        "baseline_pinball",
+        "uncalibrated_pinball",
+        "analyst_hits",
+    }
 )
 _COLUMNS = tuple(name for name in ForecastOutcome.model_fields if name != "daily")
 _DAILY_COLUMNS = tuple(OutcomeDaily.model_fields)
@@ -50,6 +57,9 @@ class OutcomeStore:
         """Fail fast with a clear message if the outcome migration has not been applied."""
         rows = self.db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
         missing = sorted(set(_REQUIRED_TABLES) - {r["name"] for r in rows})
+        if not missing:
+            columns = {r["name"] for r in self.db.fetchall("PRAGMA table_info(forecast_outcomes)")}
+            missing = [f"forecast_outcomes.{c}" for c in _COLUMNS if c not in columns]
         if missing:
             raise OutcomeStoreError(
                 f"Outcome tables are missing ({', '.join(missing)}); "

@@ -1,4 +1,5 @@
-"""Production entry point for one forecast run: always persists the snapshot and memory."""
+"""Production entry point for one forecast run: always persists the snapshot and memory,
+and applies the ticker's current calibration."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from typing import Any, Optional
 from stock_analysis.database import (
     ForecastSnapshotError,
     ForecastSnapshotStore,
+    LearningStore,
     MemoryStore,
     get_database,
 )
@@ -38,24 +40,30 @@ def run_forecast(
     llm_factory: Any = None,
     store: Optional[ForecastSnapshotStore] = None,
     memory_store: Optional[MemoryStore] = None,
+    learning_store: Optional[LearningStore] = None,
 ) -> GraphState:
     """Run the forecast graph and guarantee every completed forecast is stored.
 
-    Both stores default to the configured application database. The run starts
-    with prior context from memory and ends by writing this forecast's insight;
-    a memory failure is logged (``memory_written``) but never fails the run.
+    All stores default to the configured application database. The run starts
+    with prior context from memory, applies the latest calibration for the
+    ticker (the uncalibrated baseline is stored alongside as the shadow
+    forecast), and ends by writing this forecast's insight; a memory failure is
+    logged (``memory_written``) but never fails the run.
 
     Raises:
         ForecastSnapshotError: the snapshot tables are missing, or a completed
             forecast was not persisted together with its price history.
         MemoryStoreError: the memory tables are missing.
+        LearningStoreError: the learning tables are missing.
     """
     store = store or ForecastSnapshotStore(get_database())
     memory_store = memory_store or MemoryStore(get_database())
+    learning_store = learning_store or LearningStore(get_database())
     store.ensure_schema()
     memory_store.ensure_schema()
+    learning_store.ensure_schema()
 
-    result = compile_graph(llm_factory, store, memory_store).invoke(
+    result = compile_graph(llm_factory, store, memory_store, learning_store).invoke(
         _with_company_name(initial_state)
     )
     final = result if isinstance(result, GraphState) else GraphState(**result)

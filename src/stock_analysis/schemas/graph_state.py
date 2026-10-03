@@ -71,6 +71,9 @@ class GraphState(BaseModel):
     price_snapshot: Optional[dict] = None  # fingerprint of the price history used
     quant_baseline: Optional[dict] = None
     quant_daily_path: Optional[list[dict]] = None
+    # Shadow forecast: the quant baseline before calibration, and the calibration applied
+    quant_baseline_uncalibrated: Optional[dict] = None
+    calibration: Optional[dict] = None
     predictor_result: Optional[dict] = None
     critic_result: Optional[dict] = None
     forecast_revision_count: int = 0

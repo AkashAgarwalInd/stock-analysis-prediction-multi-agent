@@ -167,9 +167,17 @@ class TestVersionPersistence:
         assert after["fundamental_analyst"] == before["fundamental_analyst"]
 
     def test_calibration_version_persisted(self, store, adjusted_state):
-        snap = build_forecast_snapshot(adjusted_state, made_at=MADE_AT, calibration_version=3)
+        calibrated = adjusted_state.model_copy(
+            update={
+                "calibration": {"version": 3, "vol_multiplier": 1.2, "p50_bias_shift_pct": 0.0},
+                "quant_baseline_uncalibrated": adjusted_state.quant_baseline,
+            }
+        )
+        snap = build_forecast_snapshot(calibrated, made_at=MADE_AT)
         store.save(snap)
-        assert store.get(snap.forecast_id).calibration_version == 3
+        loaded = store.get(snap.forecast_id)
+        assert loaded.calibration_version == 3
+        assert loaded.calibration == snap.calibration
 
     def test_default_calibration_version_is_uncalibrated(self, snapshot):
         assert snapshot.calibration_version == 0

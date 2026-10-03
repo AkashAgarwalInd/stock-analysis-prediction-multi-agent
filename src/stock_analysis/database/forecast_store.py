@@ -158,13 +158,33 @@ def _daily_values(snapshot: ForecastSnapshot) -> Rows:
     ]
 
 
-def _storage_hash(row: tuple[Any, ...], decisions: Rows, daily: Rows) -> str:
-    """SHA-256 over the exact values written to the three tables.
+_SHADOW_COLUMNS = ("calibration_version", "calibration_json", "uncalibrated_baseline_json")
+
+
+def _shadow_values(snapshot: ForecastSnapshot) -> Optional[tuple[Any, ...]]:
+    if snapshot.uncalibrated_baseline is None:
+        return None
+    data = snapshot.model_dump(mode="json")
+    return (
+        snapshot.calibration_version,
+        canonical_json(data["calibration"]) if data["calibration"] else None,
+        canonical_json(data["uncalibrated_baseline"]),
+    )
+
+
+def _storage_hash(
+    row: tuple[Any, ...], decisions: Rows, daily: Rows, shadow: Optional[tuple[Any, ...]] = None
+) -> str:
+    """SHA-256 over the exact values written to the snapshot tables.
 
     Hashing stored values (rather than a re-serialised model) keeps old
     snapshots verifiable even if model serialisation changes in a later release.
+    The shadow-forecast row is included only when present, so snapshots stored
+    before shadow forecasts existed still verify.
     """
     payload = [list(row), [list(d) for d in decisions], [list(p) for p in daily]]
+    if shadow is not None:
+        payload.append(list(shadow))
     return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
@@ -177,6 +197,7 @@ _REQUIRED_TABLES = (
     "forecast_decisions",
     "forecast_daily_predictions",
     "price_history_snapshots",
+    "shadow_forecasts",
 )
 
 
@@ -258,7 +279,8 @@ class ForecastSnapshotStore:
         row = _snapshot_values(snapshot)
         decisions = _decision_values(snapshot)
         daily = _daily_values(snapshot)
-        digest = _storage_hash(row, decisions, daily)
+        shadow = _shadow_values(snapshot)
+        digest = _storage_hash(row, decisions, daily, shadow)
         fid = snapshot.forecast_id
         try:
             with self.db.transaction() as conn:
@@ -274,6 +296,11 @@ class ForecastSnapshotStore:
                     _insert_sql("forecast_daily_predictions", ("forecast_id", *_DAILY_COLUMNS)),
                     [(fid, *p) for p in daily],
                 )
+                if shadow is not None:
+                    conn.execute(
+                        _insert_sql("shadow_forecasts", ("forecast_id", *_SHADOW_COLUMNS)),
+                        (fid, *shadow),
+                    )
         except sqlite3.IntegrityError as err:
             if "UNIQUE constraint failed: forecast_snapshots." in str(err):
                 raise SnapshotExistsError(
@@ -398,8 +425,17 @@ class ForecastSnapshotStore:
             "WHERE forecast_id = ? ORDER BY day_index",
             (forecast_id,),
         )
+        shadow = self.db.fetchone(
+            f"SELECT {', '.join(_SHADOW_COLUMNS)} FROM shadow_forecasts WHERE forecast_id = ?",
+            (forecast_id,),
+        )
         values = tuple(row[c] for c in _SNAPSHOT_COLUMNS)
-        stored = _storage_hash(values, [tuple(d) for d in decisions], [tuple(p) for p in daily])
+        stored = _storage_hash(
+            values,
+            [tuple(d) for d in decisions],
+            [tuple(p) for p in daily],
+            tuple(shadow) if shadow is not None else None,
+        )
         if stored != row["snapshot_hash"]:
             raise SnapshotIntegrityError(f"Snapshot {forecast_id} does not match its stored hash")
 
@@ -448,5 +484,13 @@ class ForecastSnapshotStore:
                     for d in decisions
                 ],
                 "daily_predictions": [{k: p[k] for k in _DAILY_COLUMNS} for p in daily],
+                "calibration": (
+                    json.loads(shadow["calibration_json"])
+                    if shadow is not None and shadow["calibration_json"]
+                    else None
+                ),
+                "uncalibrated_baseline": (
+                    json.loads(shadow["uncalibrated_baseline_json"]) if shadow is not None else None
+                ),
             }
         )

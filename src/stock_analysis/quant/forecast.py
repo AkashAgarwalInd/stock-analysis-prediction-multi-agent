@@ -145,6 +145,12 @@ class QuantForecaster:
 
         Both come from a single simulation, so the last daily entry matches the
         endpoint baseline exactly.
+
+        ``calibration_params`` may carry ``vol_multiplier`` (scales each simulated
+        shock around the drift) and ``p50_bias_shift_pct`` (shifts the whole
+        distribution, so the P50 price moves by that percentage). Both reuse the
+        same random draws, so a calibrated and an uncalibrated run with the same
+        seed differ only by the calibration.
         """
         if len(prices) < 2:
             raise ValueError("Need at least 2 price points")
@@ -158,12 +164,20 @@ class QuantForecaster:
             drift = calibration_params["momentum_drift"]
         elif regime == "trending":
             drift = compute_momentum_drift(log_returns)
+        vol_multiplier = float((calibration_params or {}).get("vol_multiplier", 1.0))
+        bias_shift_pct = float((calibration_params or {}).get("p50_bias_shift_pct", 0.0))
+        if vol_multiplier <= 0:
+            raise ValueError("vol_multiplier must be positive")
 
         rng = np.random.default_rng(self.seed)
-        vol = self.volatility_model.estimate(log_returns)
+        vol = self.volatility_model.estimate(log_returns) * vol_multiplier
         paths = self.volatility_model.simulate_paths(
             log_returns, self.n_paths, self.horizon, drift, rng
         )
+        if vol_multiplier != 1.0:
+            paths = drift + (paths - drift) * vol_multiplier
+        if bias_shift_pct != 0.0:
+            paths = paths + np.log1p(bias_shift_pct / 100.0) / self.horizon
 
         cumulative_returns = np.cumsum(paths, axis=1)
         flat_threshold = self.flat_threshold_pct / 100.0

@@ -33,6 +33,19 @@ def _value_added_text(value: float) -> str:
     return "0.0000 (same loss as the quant baseline)"
 
 
+def _shadow_line(outcome: ForecastOutcome) -> str:
+    """Uncalibrated quant vs calibrated quant (Plan.md §23 shadow forecast)."""
+    if outcome.calibration_version == 0 or outcome.uncalibrated_loss is None:
+        return "- Calibration: none applied; the quant baseline is the uncalibrated model"
+    gain = outcome.calibration_value_added or 0.0
+    verdict = "helped" if gain > 0 else ("hurt" if gain < 0 else "made no difference")
+    return (
+        f"- Uncalibrated quant loss ({outcome.loss_metric}): {outcome.uncalibrated_loss:.4f}; "
+        f"calibration v{outcome.calibration_version} {verdict} on this forecast "
+        f"({gain:+.4f})"
+    )
+
+
 def render_last_forecast_vs_actual(snapshot: ForecastSnapshot, outcome: ForecastOutcome) -> str:
     """Render the review of one evaluated forecast as markdown."""
     final = snapshot.final_forecast
@@ -80,6 +93,7 @@ def render_last_forecast_vs_actual(snapshot: ForecastSnapshot, outcome: Forecast
         f"- Baseline loss ({outcome.loss_metric}): {outcome.baseline_loss:.4f}",
         f"- Final loss ({outcome.loss_metric}): {outcome.final_loss:.4f}",
         f"- LLM value added: {_value_added_text(outcome.llm_value_added or 0.0)}",
+        _shadow_line(outcome),
         f"- Adjustment gate: {outcome.adjustment_gate_decision or 'n/a'}; adjustment applied: "
         f"{'yes' if outcome.adjustment_applied else 'no'}",
     ]

@@ -13,6 +13,7 @@ from stock_analysis.config.settings import get_settings
 from stock_analysis.quant.forecast import EWMAVolatility, QuantForecaster
 from stock_analysis.schemas.analyst_reports import AnalystReport
 from stock_analysis.schemas.forecast_pipeline import PredictorResult
+from stock_analysis.schemas.learning import PostmortemDiagnosis
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -23,6 +24,7 @@ ANALYST_PROMPT_FILES = {
     "sentiment_analyst": "sentiment_analyst.txt",
     "context_analyst": "context_analyst.txt",
 }
+POSTMORTEM_PROMPT_FILE = "postmortem.txt"
 
 # The predictor prompt is assembled in code (workflow.build_predictor_prompt);
 # bump this whenever that function's wording or constraints change.
@@ -30,9 +32,12 @@ PREDICTOR_PROMPT_VERSION = "4"
 # Bump when the deterministic critic's checks or tolerances change.
 CRITIC_VERSION = "1"
 # Bump when the report layout changes.
-REPORT_WRITER_VERSION = "3"
+REPORT_WRITER_VERSION = "4"
 # Bump when ForecastInsight distillation (schemas/memory.py) changes.
 MEMORY_WRITER_VERSION = "1"
+# Bump when the calibration estimator, shrinkage or eligibility rules change
+# (learning/calibration.py).
+CALIBRATOR_VERSION = "1"
 
 # Quant baseline settings used by the graph's quant_baseline node.
 QUANT_SEED = 42
@@ -62,6 +67,14 @@ def get_prompt_versions() -> dict[str, str]:
     return versions
 
 
+def get_postmortem_version() -> str:
+    """Version of the postmortem prompt file and its response schema (content hashes)."""
+    return (
+        f"prompt={_file_digest(PROMPTS_DIR / POSTMORTEM_PROMPT_FILE)},"
+        f"schema={_schema_digest(PostmortemDiagnosis)}"
+    )
+
+
 def get_model_versions(quant_method: str) -> dict[str, str]:
     """Configured LLM model IDs and the versions of the deterministic components."""
     settings = get_settings()
@@ -79,4 +92,5 @@ def get_model_versions(quant_method: str) -> dict[str, str]:
         "critic": f"deterministic@{CRITIC_VERSION}",
         "report_writer": f"deterministic@{REPORT_WRITER_VERSION}",
         "memory_writer": f"deterministic@{MEMORY_WRITER_VERSION}",
+        "calibrator": f"deterministic@{CALIBRATOR_VERSION}",
     }

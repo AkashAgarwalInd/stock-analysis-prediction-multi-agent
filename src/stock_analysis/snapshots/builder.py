@@ -26,6 +26,7 @@ from stock_analysis.schemas.forecast_pipeline import CriticResult, FinalForecast
 from stock_analysis.schemas.graph_state import GraphState
 from stock_analysis.schemas.snapshot import (
     UNCALIBRATED_VERSION,
+    AppliedCalibration,
     DailyPrediction,
     DecisionAuditRecord,
     ForecastSnapshot,
@@ -141,10 +142,12 @@ def build_forecast_snapshot(
     state: GraphState,
     *,
     made_at: Optional[datetime] = None,
-    calibration_version: int = UNCALIBRATED_VERSION,
     calendar: Optional[TradingCalendar] = None,
 ) -> ForecastSnapshot:
     """Build the immutable snapshot for the forecast in ``state``.
+
+    The calibration applied by the quant node (if any) and the uncalibrated
+    quant baseline (the shadow forecast) are always recorded.
 
     Raises:
         SnapshotNotReadyError: no valid final forecast / quant baseline in state.
@@ -158,6 +161,11 @@ def build_forecast_snapshot(
         raise SnapshotNotReadyError("No valid quant baseline to snapshot")
 
     final = FinalForecast(**raw_final)
+    calibration = (
+        AppliedCalibration.model_validate(state.calibration) if state.calibration else None
+    )
+    if calibration is not None and not state.quant_baseline_uncalibrated:
+        raise SnapshotNotReadyError("Calibrated forecast is missing its uncalibrated baseline")
     made_at = made_at or datetime.now(UTC)
     calendar = calendar or get_trading_calendar()
 
@@ -262,7 +270,9 @@ def build_forecast_snapshot(
         ),
         model_versions=get_model_versions(str(quant.get("method", "unknown"))),
         prompt_versions=get_prompt_versions(),
-        calibration_version=calibration_version,
+        calibration_version=calibration.version if calibration else UNCALIBRATED_VERSION,
+        calibration=calibration,
+        uncalibrated_baseline=_plain(state.quant_baseline_uncalibrated or quant),
     )
 
 

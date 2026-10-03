@@ -22,7 +22,8 @@ from stock_analysis.schemas.snapshot import ForecastSnapshot
 from stock_analysis.snapshots.builder import IST, NSE_CLOSE_IST
 
 # Bump when any metric definition or validity rule changes.
-SCORER_VERSION = "1"
+# 2: also scores the uncalibrated shadow baseline (Plan.md §23).
+SCORER_VERSION = "2"
 
 # Price history re-adjusted by more than this since the forecast is noted in the audit trail
 _ADJUSTMENT_NOTE_TOLERANCE = 0.005
@@ -78,6 +79,7 @@ def _base(snapshot: ForecastSnapshot, now: datetime) -> dict[str, Any]:
         "adjustment_gate_decision": gate.decision if gate else None,
         "adjustment_applied": final.adjustment_applied,
         "fallback_to_quant": final.fallback_to_quant,
+        "calibration_version": snapshot.calibration_version,
     }
 
 
@@ -218,6 +220,7 @@ def score_forecast(
 
     final = snapshot.final_forecast
     quant = snapshot.quant_baseline
+    shadow = snapshot.shadow_baseline
     final_brier = metrics.brier_score(final.prob_up, final.prob_flat, final.prob_down, realized)
     base_brier = metrics.brier_score(
         quant["prob_up"], quant["prob_flat"], quant["prob_down"], realized
@@ -230,6 +233,16 @@ def score_forecast(
         quant["p10_price"],
         quant["p50_price"],
         quant["p90_price"],
+        actual_return,
+    )
+    shadow_brier = metrics.brier_score(
+        shadow["prob_up"], shadow["prob_flat"], shadow["prob_down"], realized
+    )
+    shadow_pinball = metrics.quantile_losses(
+        snapshot.last_close,
+        shadow["p10_price"],
+        shadow["p50_price"],
+        shadow["p90_price"],
         actual_return,
     )
     predicted = metrics.predicted_direction(final.prob_up, final.prob_flat, final.prob_down)
@@ -298,6 +311,14 @@ def score_forecast(
         final_loss=final_brier,
         llm_value_added=base_brier - final_brier,
         llm_value_added_pinball=base_pinball["mean"] - final_pinball["mean"],
+        baseline_in_80pct_band=quant["p10_price"] <= basis <= quant["p90_price"],
+        uncalibrated_signed_error_pct=metrics.pct_return(shadow["p50_price"], basis),
+        uncalibrated_in_80pct_band=shadow["p10_price"] <= basis <= shadow["p90_price"],
+        uncalibrated_brier=shadow_brier,
+        uncalibrated_pinball=shadow_pinball,
+        uncalibrated_loss=shadow_brier,
+        calibration_value_added=shadow_brier - base_brier,
+        calibration_value_added_pinball=shadow_pinball["mean"] - base_pinball["mean"],
         analyst_hits=_analyst_hits(snapshot, realized),
         daily=daily,
     )

@@ -160,13 +160,21 @@ class TestCorrections:
         assert [s.version for s in store.list_versions(corrected.forecast_id)] == [1, 2]
 
     def test_correction_keeps_original_calibration_version(self, store, adjusted_state):
-        snap = build_forecast_snapshot(adjusted_state, made_at=MADE_AT, calibration_version=1)
+        calibration = {"version": 1, "vol_multiplier": 1.2, "p50_bias_shift_pct": 0.0}
+        calibrated = adjusted_state.model_copy(
+            update={
+                "calibration": calibration,
+                "quant_baseline_uncalibrated": adjusted_state.quant_baseline,
+            }
+        )
+        snap = build_forecast_snapshot(calibrated, made_at=MADE_AT)
         store.save(snap)
         store.record_correction(
             snap.forecast_id,
             reason="Recalibrated",
             corrected_at=CORRECTED_AT,
             calibration_version=2,
+            calibration={**calibration, "version": 2},
         )
         assert store.get(snap.forecast_id).calibration_version == 1
         assert store.get_latest(snap.forecast_id).calibration_version == 2

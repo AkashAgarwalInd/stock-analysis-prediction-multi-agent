@@ -21,7 +21,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from stock_analysis.schemas.analyst_reports import DecisionType, MarketRegime, RiskCategory
 from stock_analysis.schemas.forecast_pipeline import CriticResult, FinalForecast
 
-# No calibration layer exists yet (Plan.md Phase 12); version 0 means "uncalibrated".
+# Calibration version 0 means "uncalibrated": no stored calibration was applied.
 UNCALIBRATED_VERSION = 0
 
 
@@ -92,6 +92,16 @@ class PriceHistorySnapshot(BaseModel):
             "last_date": _date(self.dates[-1] if self.dates else None),
             "history_sha256": self.history_sha256,
         }
+
+
+class AppliedCalibration(BaseModel):
+    """The calibration parameters a forecast's quant baseline was computed with."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: int = Field(ge=1)
+    vol_multiplier: float = Field(gt=0)
+    p50_bias_shift_pct: float
 
 
 class DecisionAuditRecord(BaseModel):
@@ -172,6 +182,9 @@ class ForecastSnapshot(BaseModel):
     model_versions: dict[str, str]
     prompt_versions: dict[str, str]
     calibration_version: int = Field(default=UNCALIBRATED_VERSION, ge=0)
+    calibration: Optional[AppliedCalibration] = None
+    # Shadow forecast (Plan.md §23): the quant baseline before calibration
+    uncalibrated_baseline: Optional[dict[str, Any]] = None
 
     @model_validator(mode="after")
     def _validate_lineage(self) -> ForecastSnapshot:
@@ -189,6 +202,20 @@ class ForecastSnapshot(BaseModel):
                 "and corrected_at"
             )
         return self
+
+    @model_validator(mode="after")
+    def _validate_calibration(self) -> ForecastSnapshot:
+        applied = self.calibration.version if self.calibration else UNCALIBRATED_VERSION
+        if applied != self.calibration_version:
+            raise ValueError("calibration_version must match the applied calibration")
+        if self.calibration is not None and self.uncalibrated_baseline is None:
+            raise ValueError("a calibrated forecast must keep its uncalibrated baseline")
+        return self
+
+    @property
+    def shadow_baseline(self) -> dict[str, Any]:
+        """The uncalibrated quant baseline (the quant baseline itself when uncalibrated)."""
+        return self.uncalibrated_baseline or self.quant_baseline
 
     @model_validator(mode="after")
     def _validate_data_snapshot_id(self) -> ForecastSnapshot:

@@ -8,10 +8,20 @@ from rich.table import Table
 from stock_analysis.config import get_settings
 from stock_analysis.database import (
     ForecastSnapshotStore,
+    LearningStore,
+    MemoryStore,
     OutcomeStore,
     close_database,
     init_database,
     run_migrations,
+)
+from stock_analysis.learning import (
+    LearningCycle,
+    RssHindsightNewsSource,
+    compare_benchmarks,
+    render_adaptation,
+    render_lesson_actions,
+    render_postmortem,
 )
 from stock_analysis.logging import configure_logging, get_logger
 from stock_analysis.review import OutcomeReviewer, render_last_forecast_vs_actual
@@ -61,22 +71,50 @@ def migrate() -> None:
 @app.command()
 def review(
     ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    llm: bool = typer.Option(
+        True,
+        "--llm/--no-llm",
+        help="LLM postmortem with hindsight news (otherwise rules only, no network)",
+    ),
 ) -> None:
-    """Score matured forecasts against actual prices and show last forecast vs actual."""
+    """Score matured forecasts, diagnose them, update lessons and calibration."""
     db = init_database()
     try:
         snapshots, outcomes = ForecastSnapshotStore(db), OutcomeStore(db)
-        snapshots.ensure_schema()
-        outcomes.ensure_schema()
-        results = OutcomeReviewer(snapshots, outcomes).review_matured(
-            datetime.now(UTC), ticker=ticker
-        )
+        memory, learning = MemoryStore(db), LearningStore(db)
+        for store in (snapshots, outcomes, memory, learning):
+            store.ensure_schema()
+        now = datetime.now(UTC)
+        results = OutcomeReviewer(snapshots, outcomes).review_matured(now, ticker=ticker)
         if not results:
             console.print("No matured forecasts awaiting evaluation.")
         for outcome in results:
             snapshot = snapshots.get(outcome.forecast_id)
             if snapshot is not None:
                 console.print(render_last_forecast_vs_actual(snapshot, outcome), markup=False)
+
+        llm_factory = news_source = None
+        if llm:
+            from stock_analysis.llm.factory import get_llm_factory
+
+            llm_factory, news_source = get_llm_factory(), RssHindsightNewsSource()
+        report = LearningCycle(
+            snapshots, outcomes, memory, learning, llm_factory=llm_factory, news_source=news_source
+        ).run(now, ticker=ticker)
+        for postmortem in report.postmortems:
+            console.print(f"Forecast `{postmortem.forecast_id}`", markup=False)
+            console.print(render_postmortem(postmortem), markup=False)
+        if report.lesson_actions:
+            console.print(render_lesson_actions(report.lesson_actions), markup=False)
+        for update in report.calibration_updates:
+            scored = [
+                o
+                for fid in learning.scored_forecast_ids(update.ticker, before=now, limit=10_000)
+                if (o := outcomes.get(fid)) is not None
+            ]
+            console.print(render_adaptation(update, compare_benchmarks(scored)), markup=False)
+        for error in report.errors:
+            console.print(f"Learning error: {error}", markup=False)
     finally:
         close_database()
 

@@ -215,21 +215,51 @@ class MemoryStore:
             raise MemoryStoreError(f"Lesson {lesson_id} was not found after writing it")
         return lesson
 
+    def open_lessons(
+        self, ticker: Optional[str], sector: Optional[str], *, as_of: datetime
+    ) -> list[Lesson]:
+        """Candidate and active lessons as of ``as_of`` that apply to ``ticker``/``sector``.
+
+        With ``ticker=None`` every non-retired lesson is returned, whatever its scope.
+        """
+        if ticker is None:
+            rows = self.db.fetchall(
+                "SELECT lesson_id FROM lessons WHERE julianday(first_seen) <= julianday(?) "
+                "ORDER BY julianday(first_seen), lesson_id",
+                (_utc_iso(as_of),),
+            )
+        else:
+            rows = self.db.fetchall(
+                "SELECT lesson_id FROM lessons WHERE julianday(first_seen) <= julianday(?) AND ("
+                "scope = 'general' OR (scope = 'ticker' AND ticker = ?) "
+                "OR (scope = 'sector' AND sector = ?)) ORDER BY julianday(first_seen), lesson_id",
+                (_utc_iso(as_of), ticker, sector),
+            )
+        return [
+            lesson
+            for r in rows
+            if (lesson := self.get_lesson(r["lesson_id"], as_of=as_of)) is not None
+            and lesson.status != LessonStatus.RETIRED
+        ]
+
+    def evidence_windows(self, lesson_id: str) -> list[dict[str, str]]:
+        """Forecast windows behind a lesson's confirmations and contradictions."""
+        rows = self.db.fetchall(
+            "SELECT e.kind, e.forecast_id, s.as_of_date, s.target_date FROM lesson_evidence e "
+            "JOIN forecast_snapshots s ON s.forecast_id = e.forecast_id "
+            "WHERE e.lesson_id = ? ORDER BY e.id",
+            (lesson_id,),
+        )
+        return [dict(r) for r in rows]
+
     def active_lessons(
         self, ticker: str, sector: Optional[str], *, as_of: datetime, limit: int
     ) -> list[Lesson]:
         """Active lessons that apply to ``ticker``/``sector``, most specific and best supported first."""
-        rows = self.db.fetchall(
-            "SELECT lesson_id FROM lessons WHERE julianday(first_seen) <= julianday(?) AND ("
-            "scope = 'general' OR (scope = 'ticker' AND ticker = ?) "
-            "OR (scope = 'sector' AND sector = ?))",
-            (_utc_iso(as_of), ticker, sector),
-        )
         lessons = [
             lesson
-            for r in rows
-            if (lesson := self.get_lesson(r["lesson_id"], as_of=as_of)) is not None
-            and lesson.status == LessonStatus.ACTIVE
+            for lesson in self.open_lessons(ticker, sector, as_of=as_of)
+            if lesson.status == LessonStatus.ACTIVE
         ]
         lessons.sort(
             key=lambda lesson: (

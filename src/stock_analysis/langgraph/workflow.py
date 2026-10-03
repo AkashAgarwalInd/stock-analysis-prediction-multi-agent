@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 from langgraph.graph import END, StateGraph
@@ -81,13 +81,33 @@ def _max_revisions() -> int:
 
 
 def _collect_reports(state: GraphState) -> list[dict]:
-    """Return the analyst reports that are present in state."""
+    """Return the analyst reports present in state, without deliberately disabled analysts."""
     reports = []
     for field in _ANALYST_REPORT_FIELDS:
+        if field.removesuffix("_report") in state.disabled_analysts:
+            continue
         rpt = getattr(state, field)
         if rpt:
             reports.append(rpt)
     return reports
+
+
+def _now(state: GraphState) -> datetime:
+    """The run's clock: ``run_at`` for a point-in-time (historical) run, else the wall clock."""
+    return state.run_at or datetime.now(UTC)
+
+
+def disabled_analyst_report(name: AnalystType, reason: str) -> dict:
+    """Placeholder for an analyst switched off on purpose: no LLM call, no stance."""
+    return AnalystReport(
+        analyst=name,
+        stance=AnalystStance.NEUTRAL,
+        confidence=0.0,
+        key_points=[f"{name.value} analyst disabled: {reason}"[:200]],
+        evidence=[],
+        risks=[f"This forecast does not use {name.value} information"],
+        data_gaps=[{"description": reason[:300], "severity": "high"}],
+    ).model_dump(mode="json")
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -154,6 +174,9 @@ def make_analyst_node(
     instructions = Path(prompt_path).read_text()
 
     def analyst_node(state: GraphState) -> dict:
+        if name.value in state.disabled_analysts:
+            reason = state.disabled_analysts[name.value]
+            return {f"{name.value}_report": disabled_analyst_report(name, reason)}
         # Compact summaries only; never large datasets
         if name == AnalystType.TECHNICAL:
             prompt_data = {
@@ -246,13 +269,16 @@ def make_decision_engine_node() -> Callable[[GraphState], dict]:
 
 
 def _load_calibration(
-    calibration_store: Optional[LearningStore], symbol: str
+    calibration_store: Optional[LearningStore], symbol: str, as_of: datetime
 ) -> Optional[dict]:
-    """The ticker's latest calibration as applied params, or None (never blocks a forecast)."""
+    """The ticker's latest calibration at ``as_of`` as applied params, or None.
+
+    Never blocks a forecast: a failing store means an uncalibrated forecast.
+    """
     if calibration_store is None or not get_settings().learning_enabled:
         return None
     try:
-        params = calibration_store.latest_calibration(symbol, as_of=datetime.now(UTC))
+        params = calibration_store.latest_calibration(symbol, as_of=as_of)
     except (LearningStoreError, sqlite3.Error, ValidationError) as err:
         logger.warning("calibration_load_failed", symbol=symbol, error=str(err))
         return None
@@ -265,9 +291,21 @@ def _load_calibration(
     }
 
 
+PriceFetcher = Callable[[str], list[Any]]
+
+
+def _collector_prices(symbol: str) -> list[Any]:
+    """Daily bars from the live price collector (the default ``PriceFetcher``)."""
+    from stock_analysis.market.collector import get_price_collector
+
+    history = get_price_collector().fetch_history(symbol, period=QUANT_HISTORY_PERIOD, interval="1d")
+    return list(history.data or [])
+
+
 def make_quant_baseline_node(
     price_store: Optional[ForecastSnapshotStore] = None,
     calibration_store: Optional[LearningStore] = None,
+    price_fetcher: Optional[PriceFetcher] = None,
 ) -> Callable[[GraphState], dict]:
     """Quant baseline node; with ``price_store`` it also persists the exact close series.
 
@@ -275,27 +313,26 @@ def make_quant_baseline_node(
     snapshot's baseline be reproduced later (``snapshots.reproduce``). With a
     ``calibration_store`` the ticker's latest calibration is applied (unless
     ``LEARNING_ENABLED`` is false); the uncalibrated baseline is always kept as
-    the shadow forecast.
+    the shadow forecast. ``price_fetcher`` returns daily bars (``.date``,
+    ``.close``) for a symbol; a backtest passes one that stops at its as-of date.
     """
+    fetch = price_fetcher or _collector_prices
 
     def quant_baseline_node(state: GraphState) -> dict:
         """Generate the Phase 4 quant baseline from real price history."""
-        from stock_analysis.market.collector import get_price_collector
 
         def _failed(reason: str) -> dict:
             return {"quant_baseline": {"error": reason, "source": "quant_baseline_node_failed"}}
 
         try:
-            price_history = get_price_collector().fetch_history(
-                state.resolved_symbol, period=QUANT_HISTORY_PERIOD, interval="1d"
-            )
+            bars = fetch(state.resolved_symbol)
         except Exception as err:
             logger.warning(
                 "quant_price_fetch_failed", symbol=state.resolved_symbol, error=str(err)
             )
             return _failed(f"Price fetch failed for {state.resolved_symbol}: {err}")
 
-        points = [d for d in (price_history.data or []) if d.close is not None]
+        points = [d for d in bars if d.close is not None]
         close_prices = np.array([float(d.close) for d in points])
         if len(close_prices) < 20:
             return _failed(f"Insufficient valid close prices for {state.resolved_symbol}")
@@ -303,7 +340,7 @@ def make_quant_baseline_node(
         forecaster = QuantForecaster(
             seed=QUANT_SEED, n_paths=QUANT_N_PATHS, horizon=get_settings().forecast_horizon_days
         )
-        calibration = _load_calibration(calibration_store, state.symbol)
+        calibration = _load_calibration(calibration_store, state.symbol, _now(state))
         try:
             uncalibrated, daily_path = forecaster.forecast_with_daily_path(close_prices)
             baseline = uncalibrated
@@ -813,7 +850,7 @@ def make_memory_loader_node(
         if memory_store is None:
             return {}
         settings = get_settings()
-        now = datetime.now(UTC)
+        now = _now(state)
         sector = (state.fundamentals_summary or {}).get("sector")
         try:
             context = MemoryContext(
@@ -880,6 +917,7 @@ def build_workflow(
     snapshot_store: Optional[ForecastSnapshotStore] = None,
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
+    price_fetcher: Optional[PriceFetcher] = None,
 ) -> StateGraph:
     """Build the LangGraph workflow.
 
@@ -926,7 +964,9 @@ def build_workflow(
 
     workflow.add_node("guardrails", make_guardrail_node())
     workflow.add_node("decision_engine", make_decision_engine_node())
-    workflow.add_node("quant_baseline", make_quant_baseline_node(snapshot_store, learning_store))
+    workflow.add_node(
+        "quant_baseline", make_quant_baseline_node(snapshot_store, learning_store, price_fetcher)
+    )
     workflow.add_node("adjustment_gate", adjustment_gate_node)
     workflow.add_node("predictor", make_predictor_node(factory))
     workflow.add_node("critic", critic_node)
@@ -965,11 +1005,15 @@ def compile_graph(
     snapshot_store: Optional[ForecastSnapshotStore] = None,
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
+    price_fetcher: Optional[PriceFetcher] = None,
 ):
     """Compile the LangGraph workflow.
 
     Snapshots, memory and calibration are used only when their stores are
     given; production callers should use ``langgraph.runner.run_forecast``,
-    which always wires all three.
+    which always wires all three. ``price_fetcher`` replaces the live price
+    collector (a backtest passes a point-in-time one).
     """
-    return build_workflow(llm_factory, snapshot_store, memory_store, learning_store).compile()
+    return build_workflow(
+        llm_factory, snapshot_store, memory_store, learning_store, price_fetcher
+    ).compile()

@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -117,6 +118,52 @@ def review(
             console.print(f"Learning error: {error}", markup=False)
     finally:
         close_database()
+
+
+@app.command()
+def backtest(
+    ticker: str = typer.Option(..., "--ticker", "-t", help="NSE ticker, e.g. RELIANCE"),
+    weeks: int = typer.Option(12, "--weeks", "-w", min=1, max=104, help="Weeks to simulate"),
+    end: Optional[str] = typer.Option(
+        None, "--end", help="Last target date (YYYY-MM-DD); default: latest completed week"
+    ),
+    database: Optional[str] = typer.Option(
+        None, "--database", help="Database to write (default: a new file in data/backtests/)"
+    ),
+    llm: bool = typer.Option(
+        True, "--llm/--no-llm", help="Use LLM analysts and postmortems (otherwise quant only)"
+    ),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write the report here"),
+) -> None:
+    """Simulate weekly forecasts point-in-time, scoring and learning week by week."""
+    from stock_analysis.backtest import (
+        BacktestError,
+        default_database_path,
+        render_backtest_report,
+        run_backtest,
+    )
+
+    path = Path(database) if database else default_database_path(ticker.upper(), datetime.now(UTC))
+    try:
+        result = run_backtest(
+            ticker,
+            weeks,
+            database_path=path,
+            use_llm=llm,
+            end=date.fromisoformat(end) if end else None,
+            progress=lambda w: console.print(
+                f"{w.as_of_date} → {w.target_date}: {w.status}", markup=False
+            ),
+        )
+    except (BacktestError, ValueError) as err:
+        console.print(f"Backtest failed: {err}", markup=False)
+        raise typer.Exit(1) from err
+    report = render_backtest_report(result)
+    console.print(report, markup=False)
+    if output is not None:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_text(report)
+        console.print(f"Report written to {output}", markup=False)
 
 
 @app.command()

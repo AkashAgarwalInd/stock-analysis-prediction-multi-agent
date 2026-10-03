@@ -61,6 +61,23 @@ class GuardrailResult:
 # Pre-flight guardrails
 # ---------------------------------------------------------------------------
 
+_REPORT_FIELDS = {
+    "technical": "technical_report",
+    "fundamental": "fundamental_report",
+    "sentiment": "sentiment_report",
+    "context": "context_report",
+}
+
+
+def _enabled_reports(state: GraphState) -> List[Optional[dict[str, Any]]]:
+    """Reports of the analysts that ran; deliberately disabled analysts are left out."""
+    return [
+        getattr(state, field)
+        for name, field in _REPORT_FIELDS.items()
+        if name not in state.disabled_analysts
+    ]
+
+
 def validate_all_reports_present(state: GraphState) -> GuardrailResult:
     """Validate all 4 analyst reports are present."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
@@ -140,12 +157,8 @@ def validate_no_critical_data_gaps(state: GraphState) -> GuardrailResult:
 def validate_data_coverage(state: GraphState) -> GuardrailResult:
     """Validate minimum data coverage before allowing decision classification."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
-    reports = [
-        state.technical_report,
-        state.fundamental_report,
-        state.sentiment_report,
-        state.context_report,
-    ]
+    reports = _enabled_reports(state)
+    total = len(reports)
     valid_reports = 0
     total_confidence = 0.0
     for report in reports:
@@ -161,16 +174,16 @@ def validate_data_coverage(state: GraphState) -> GuardrailResult:
     if valid_reports < 2:
         result.add_violation(GuardrailViolation(
             violation_type=GuardrailViolationType.INSUFFICIENT_DATA_COVERAGE,
-            message=f"Insufficient data coverage: only {valid_reports}/4 analysts have meaningful confidence (>0.3)",
+            message=f"Insufficient data coverage: only {valid_reports}/{total} analysts have meaningful confidence (>0.3)",
             severity="error",
-            details={"valid_reports": valid_reports, "total_reports": 4},
+            details={"valid_reports": valid_reports, "total_reports": total},
         ))
-    elif valid_reports < 3:
+    elif valid_reports < min(3, total):  # 3 preferred, or all of them when fewer are enabled
         result.add_warning(GuardrailViolation(
             violation_type=GuardrailViolationType.INSUFFICIENT_DATA_COVERAGE,
-            message=f"Limited data coverage: only {valid_reports}/4 analysts have meaningful confidence",
+            message=f"Limited data coverage: only {valid_reports}/{total} analysts have meaningful confidence",
             severity="warning",
-            details={"valid_reports": valid_reports, "total_reports": 4},
+            details={"valid_reports": valid_reports, "total_reports": total},
         ))
     return result
 
@@ -178,12 +191,7 @@ def validate_data_coverage(state: GraphState) -> GuardrailResult:
 def validate_stance_distribution(state: GraphState) -> GuardrailResult:
     """Validate stance distribution is reasonable (not all extreme without neutral balance)."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
-    reports = [
-        state.technical_report,
-        state.fundamental_report,
-        state.sentiment_report,
-        state.context_report,
-    ]
+    reports = _enabled_reports(state)
     stances = []
     extreme_count = 0
     for report in reports:
@@ -211,12 +219,7 @@ def validate_stance_distribution(state: GraphState) -> GuardrailResult:
 def validate_report_quality(state: GraphState) -> GuardrailResult:
     """Validate report quality (non-empty key_points, evidence, specific risks)."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
-    reports = [
-        state.technical_report,
-        state.fundamental_report,
-        state.sentiment_report,
-        state.context_report,
-    ]
+    reports = _enabled_reports(state)
     for report in reports:
         if report is None:
             continue
@@ -256,12 +259,7 @@ def validate_report_quality(state: GraphState) -> GuardrailResult:
 def validate_consensus_confidence(state: GraphState) -> GuardrailResult:
     """Validate that consensus confidence is sufficient for decision making."""
     result = GuardrailResult(passed=True, violations=[], warnings=[])
-    reports = [
-        state.technical_report,
-        state.fundamental_report,
-        state.sentiment_report,
-        state.context_report,
-    ]
+    reports = _enabled_reports(state)
     confidences = []
     for report in reports:
         if report is None:

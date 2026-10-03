@@ -71,6 +71,9 @@ def collect_data_inputs(state: GraphState) -> dict[str, Any]:
             "memory": state.memory_context,
         }
     )
+    if state.disabled_analysts:
+        # Only recorded when used, so live snapshots keep their existing input hash
+        inputs["disabled_analysts"] = _plain(state.disabled_analysts)
     return inputs
 
 
@@ -166,7 +169,7 @@ def build_forecast_snapshot(
     )
     if calibration is not None and not state.quant_baseline_uncalibrated:
         raise SnapshotNotReadyError("Calibrated forecast is missing its uncalibrated baseline")
-    made_at = made_at or datetime.now(UTC)
+    made_at = made_at or state.run_at or datetime.now(UTC)
     calendar = calendar or get_trading_calendar()
 
     price = state.price_snapshot or {}

@@ -27,6 +27,20 @@ def run_migrations() -> None:
     logger.info("migrations_completed", stdout=result.stdout)
 
 
+def upgrade_database(path: Path) -> None:
+    """Upgrade the SQLite database at ``path`` to the latest schema (in process)."""
+    from alembic.config import Config
+
+    from alembic import command
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = Config()
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    cfg.attributes["database_url"] = f"sqlite:///{path}"
+    command.upgrade(cfg, "head")
+    logger.info("database_upgraded", path=str(path))
+
+
 def get_migration_status() -> dict:
     result = subprocess.run(
         ["alembic", "current"],

@@ -18,6 +18,10 @@ target_metadata = None
 
 
 def get_url() -> str:
+    # A caller can migrate a specific database (e.g. a backtest's own file)
+    override = config.attributes.get("database_url")
+    if override:
+        return str(override)
     settings = get_settings()
     return settings.database_url.replace("sqlite:///", "sqlite:///")
 

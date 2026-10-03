@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 # Single source of truth for analyst/decision types lives in analyst_reports.
 # Re-exported here so existing ``graph_state`` imports keep working.
@@ -45,6 +45,13 @@ class GraphState(BaseModel):
     resolved_symbol: str
     company_name: Optional[str] = None
     collectors_complete: bool = False
+    # Point-in-time clock: a historical run (backtest) sets this to when the forecast
+    # is made, so memory, calibration and the snapshot see that time instead of now.
+    run_at: Optional[AwareDatetime] = None
+    # Analysts switched off on purpose (name -> reason), e.g. no point-in-time data
+    # in a backtest. They get a deterministic placeholder report, no LLM call, and are
+    # left out of guardrail coverage/consensus and the decision engine.
+    disabled_analysts: dict[str, str] = Field(default_factory=dict)
 
     # Collector outputs (references/IDs/summaries, not large data)
     technical_indicators_summary: Optional[dict] = None

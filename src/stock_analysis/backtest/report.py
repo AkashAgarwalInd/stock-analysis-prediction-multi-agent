@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from stock_analysis.backtest.runner import BacktestResult
+from stock_analysis.learning.report import render_scorecards
 from stock_analysis.snapshots.report import DISCLAIMER
 
 
@@ -93,6 +94,7 @@ def render_backtest_report(result: BacktestResult) -> str:
     else:
         lines.append("- No calibration change: not enough evidence accumulated.")
     lines.append(f"- Active lessons at the end: {result.active_lessons}")
+    lines += ["", render_scorecards(result.scorecards).rstrip()]
 
     lines += ["", "## Limitations", ""]
     lines += [f"- {name} analyst disabled: {why}" for name, why in result.disabled_analysts.items()]

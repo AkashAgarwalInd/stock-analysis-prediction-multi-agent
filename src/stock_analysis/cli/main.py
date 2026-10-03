@@ -8,10 +8,13 @@ from rich.table import Table
 
 from stock_analysis.config import get_settings
 from stock_analysis.database import (
+    Database,
     ForecastSnapshotStore,
     LearningStore,
+    LearningStoreError,
     MemoryStore,
     OutcomeStore,
+    OutcomeStoreError,
     close_database,
     init_database,
     run_migrations,
@@ -19,10 +22,12 @@ from stock_analysis.database import (
 from stock_analysis.learning import (
     LearningCycle,
     RssHindsightNewsSource,
+    build_scorecards,
     compare_benchmarks,
     render_adaptation,
     render_lesson_actions,
     render_postmortem,
+    render_scorecards,
 )
 from stock_analysis.logging import configure_logging, get_logger
 from stock_analysis.review import OutcomeReviewer, render_last_forecast_vs_actual
@@ -118,6 +123,37 @@ def review(
             console.print(f"Learning error: {error}", markup=False)
     finally:
         close_database()
+
+
+@app.command()
+def scorecard(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    database: Optional[str] = typer.Option(
+        None, "--database", help="Database to read, e.g. a backtest's (default: the app database)"
+    ),
+) -> None:
+    """Show analyst, regime and decision scorecards (evaluation only)."""
+    if database and not Path(database).exists():
+        console.print(f"No database at {database}", markup=False)
+        raise typer.Exit(1)
+    db = Database(Path(database)) if database else init_database()
+    try:
+        outcomes, learning = OutcomeStore(db), LearningStore(db)
+        try:
+            outcomes.ensure_schema()
+            learning.ensure_schema()
+        except (OutcomeStoreError, LearningStoreError) as err:
+            console.print(str(err), markup=False)
+            raise typer.Exit(1) from err
+        # Tickers are stored without the exchange suffix (RELIANCE, not RELIANCE.NS)
+        base = ticker.upper().split(".")[0] if ticker else None
+        cards = build_scorecards(outcomes, learning, as_of=datetime.now(UTC), ticker=base)
+        console.print(render_scorecards(cards), markup=False)
+    finally:
+        if database:
+            db.close()
+        else:
+            close_database()
 
 
 @app.command()

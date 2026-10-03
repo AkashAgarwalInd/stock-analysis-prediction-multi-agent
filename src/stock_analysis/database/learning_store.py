@@ -229,6 +229,20 @@ class LearningStore:
         )
         return [DecisionOutcome.model_validate(dict(r)) for r in rows]
 
+    def list_decision_outcomes(
+        self, *, before: datetime, ticker: Optional[str] = None
+    ) -> list[DecisionOutcome]:
+        """Decision outcomes recorded by ``before`` (point-in-time), oldest target first."""
+        ticker_filter = " AND ticker = ?" if ticker else ""
+        params: tuple[Any, ...] = (_utc_iso(before), *((ticker,) if ticker else ()))
+        rows = self.db.fetchall(
+            f"SELECT {', '.join(_DECISION_OUTCOME_COLUMNS)} FROM decision_outcomes "
+            f"WHERE julianday(recorded_at) <= julianday(?){ticker_filter} "
+            "ORDER BY target_date, forecast_id, decision_type",
+            params,
+        )
+        return [DecisionOutcome.model_validate(dict(r)) for r in rows]
+
     def decision_outcome_summary(
         self, *, before: Optional[datetime] = None, ticker: Optional[str] = None
     ) -> list[DecisionOutcomeSummary]:

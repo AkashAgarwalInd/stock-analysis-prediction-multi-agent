@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Optional
 
 from stock_analysis.database.database import Database
 from stock_analysis.logging import get_logger
 from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeDaily, OutcomeStatus
+from stock_analysis.schemas.scorecard import ScoredForecast
 from stock_analysis.schemas.snapshot import canonical_json
 
 logger = get_logger(__name__)
@@ -133,6 +134,47 @@ class OutcomeStore:
             params,
         )
         return [r["forecast_id"] for r in rows]
+
+    def scored_forecasts(
+        self, *, before: datetime, ticker: Optional[str] = None
+    ) -> list[ScoredForecast]:
+        """Scored original forecasts evaluated by ``before`` (point-in-time), oldest first."""
+        ticker_filter = " AND s.ticker = ?" if ticker else ""
+        params: tuple[Any, ...] = (
+            before.astimezone(UTC).isoformat(),
+            *((ticker,) if ticker else ()),
+        )
+        rows = self.db.fetchall(
+            "SELECT o.forecast_id, s.ticker, s.market_regime, s.data_inputs_json, s.as_of_date, "
+            "s.target_date, o.evaluated_at, o.direction_correct, o.in_80pct_band, "
+            "o.signed_error_pct, o.abs_error_pct, o.brier, o.analyst_hits "
+            "FROM forecast_outcomes o JOIN forecast_snapshots s ON s.forecast_id = o.forecast_id "
+            "WHERE o.status = 'scored' AND s.version = 1 "
+            f"AND julianday(o.evaluated_at) <= julianday(?){ticker_filter} "
+            "ORDER BY o.target_date, s.made_at",
+            params,
+        )
+        out = []
+        for r in rows:
+            sector = (json.loads(r["data_inputs_json"]).get("fundamentals") or {}).get("sector")
+            out.append(
+                ScoredForecast(
+                    forecast_id=r["forecast_id"],
+                    ticker=r["ticker"],
+                    sector=sector if isinstance(sector, str) and sector else None,
+                    market_regime=r["market_regime"],
+                    as_of_date=r["as_of_date"],
+                    target_date=r["target_date"],
+                    evaluated_at=r["evaluated_at"],
+                    direction_correct=bool(r["direction_correct"]),
+                    in_80pct_band=bool(r["in_80pct_band"]),
+                    signed_error_pct=r["signed_error_pct"],
+                    abs_error_pct=r["abs_error_pct"],
+                    brier=r["brier"],
+                    analyst_hits=json.loads(r["analyst_hits"]) if r["analyst_hits"] else {},
+                )
+            )
+        return out
 
     def latest_for_ticker(self, ticker: str) -> Optional[ForecastOutcome]:
         """The most recent stored outcome (by target date) for an original forecast of ``ticker``."""

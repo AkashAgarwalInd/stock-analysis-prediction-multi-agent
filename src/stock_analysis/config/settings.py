@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     calibration_bias_min_t_stat: float = 2.0
     calibration_bias_min_sign_agreement: float = 0.6
 
+    # Plan.md Phase 13 scorecards (§24): evaluation only; nothing is reweighted automatically
+    min_samples_analyst_weights: int = 20
+    analyst_weighting_enabled: bool = False  # feature flag; no weighting is implemented yet
+    min_samples_decision_evaluation: int = 20
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path}"

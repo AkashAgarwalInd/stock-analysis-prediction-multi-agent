@@ -5,7 +5,8 @@ Weeks are processed strictly in order, each on the simulated clock::
     week k forecast (as of its as-of close, using only data up to then,
                      with the memory and calibration that existed then)
       -> actual prices for week k
-      -> score -> postmortem -> lessons -> eligible calibration update
+      -> review graph: score -> postmortem -> lessons -> eligible calibration
+         update -> scorecards -> track record
       -> week k+1 forecast ...
 
 so no forecast is ever made with lessons or calibration learned later.
@@ -50,16 +51,12 @@ from stock_analysis.database import (
 )
 from stock_analysis.database.forecast_store import ForecastSnapshotError
 from stock_analysis.database.migrations import upgrade_database
+from stock_analysis.langgraph.review_graph import compile_review_graph, invoke_review
 from stock_analysis.langgraph.workflow import compile_graph
-from stock_analysis.learning import (
-    LearningCycle,
-    build_evaluation,
-    build_scorecards,
-    compare_benchmarks,
-)
+from stock_analysis.learning import build_evaluation, build_scorecards, compare_benchmarks
 from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar, get_trading_calendar
-from stock_analysis.review import OutcomeReviewer, last_completed_trading_date
+from stock_analysis.review import last_completed_trading_date
 from stock_analysis.review.prices import NIFTY_50_SYMBOL
 from stock_analysis.schemas.graph_state import GraphState
 from stock_analysis.schemas.learning import BenchmarkComparison, CalibrationParams
@@ -319,8 +316,15 @@ def _run(
         graph_llm = postmortem_llm = get_llm_factory()
 
     prices = data.price_source()
-    reviewer = OutcomeReviewer(snapshots, outcomes, prices, calendar)
-    cycle = LearningCycle(snapshots, outcomes, memory, learning, llm_factory=postmortem_llm)
+    review_graph = compile_review_graph(
+        snapshots,
+        outcomes,
+        memory,
+        learning,
+        price_source=prices,
+        calendar=calendar,
+        llm_factory=postmortem_llm,
+    )
     results: list[BacktestWeek] = []
     errors: list[str] = []
 
@@ -353,18 +357,19 @@ def _run(
                 logger.error("backtest_forecast_failed", as_of=str(as_of), error=str(err))
                 week.reason = f"forecast failed: {err}"[:300]
                 errors.append(f"{as_of}: {err}")
-        # Evaluate and learn at the target session's data time, before the next forecast
+        # Review (score, learn, recalibrate) at the target session's data time,
+        # before the next forecast
         prices.available_until = target
-        for outcome in reviewer.review_matured(week.evaluated_at, ticker=base):
+        review = invoke_review(review_graph, week.evaluated_at, ticker=base)
+        for outcome in review.outcomes:
             if outcome.forecast_id == week.forecast_id:
                 _record_outcome(week, outcome)
-        report = cycle.run(week.evaluated_at, ticker=base)
-        errors += report.errors
-        for pm in report.postmortems:
+        errors += review.errors
+        for pm in review.postmortems:
             if pm.forecast_id == week.forecast_id:
                 week.primary_cause = pm.primary_cause.value
-        week.lessons_created = sum(a.action == "created" for a in report.lesson_actions)
-        week.calibration_changed = any(u.changed for u in report.calibration_updates)
+        week.lessons_created = sum(a.action == "created" for a in review.lesson_actions)
+        week.calibration_changed = any(u.changed for u in review.calibration_updates)
         results.append(week)
         logger.info("backtest_week", **week.model_dump(mode="json"))
         if progress is not None:

@@ -2,14 +2,16 @@
 
 For every scored original forecast without a postmortem, oldest first:
 
-1. record its decision-engine decisions with how the forecast did (for later
-   evaluation; no decision rule is changed automatically);
-2. diagnose it (``run_postmortem``) and apply any lessons to the lesson lifecycle;
+1. diagnose it (``run_postmortem``; ``diagnose``);
+2. record its decision-engine decisions with how the forecast did (for later
+   evaluation; no decision rule is changed automatically) and apply any lessons
+   to the lesson lifecycle (``apply``);
 3. store the postmortem last, which marks the forecast as processed.
 
 Then stale lessons are retired and each affected ticker's calibration is
-re-estimated. Steps 1-2 are idempotent per forecast, so a run interrupted
-before step 3 is safely repeated.
+re-estimated (``recalibrate``). Steps 1-2 are idempotent per forecast, so a run
+interrupted before step 3 is safely repeated. ``run`` does all of it; the review
+graph (``langgraph.review_graph``) runs the steps as separate nodes.
 """
 
 from __future__ import annotations
@@ -135,8 +137,27 @@ class LearningCycle:
 
     def run(self, now: datetime, *, ticker: Optional[str] = None) -> LearningReport:
         """Process every scored forecast without a postmortem, then recalibrate."""
-        report = LearningReport()
+        postmortems, tickers, errors = self.diagnose(now, ticker=ticker)
+        report = self.apply(postmortems, now)
+        updates, calibration_errors = self.recalibrate(sorted(tickers), now)
+        return report.model_copy(
+            update={
+                "calibration_updates": updates,
+                "errors": errors + report.errors + calibration_errors,
+            }
+        )
+
+    def diagnose(
+        self, now: datetime, *, ticker: Optional[str] = None
+    ) -> tuple[list[PostMortem], set[str], list[str]]:
+        """Postmortems (not yet stored) for every scored forecast without one, oldest first.
+
+        Returns the postmortems, the tickers to recalibrate (``ticker`` plus every
+        ticker with a pending forecast, even if its postmortem failed) and errors.
+        """
+        postmortems: list[PostMortem] = []
         tickers: set[str] = {ticker} if ticker else set()
+        errors: list[str] = []
         for forecast_id in self.learning_store.pending_postmortems(before=now, ticker=ticker):
             try:
                 snapshot = self.snapshot_store.get(forecast_id)
@@ -145,13 +166,37 @@ class LearningCycle:
                     continue
                 # Recalibrate this ticker even if its postmortem fails below
                 tickers.add(snapshot.ticker)
-                postmortem = run_postmortem(
-                    snapshot,
-                    outcome,
-                    llm_factory=self.llm_factory,
-                    now=now,
-                    news=self._news(snapshot),
+                postmortems.append(
+                    run_postmortem(
+                        snapshot,
+                        outcome,
+                        llm_factory=self.llm_factory,
+                        now=now,
+                        news=self._news(snapshot),
+                    )
                 )
+            except (
+                ForecastSnapshotError,
+                LearningStoreError,
+                sqlite3.Error,
+                ValueError,  # includes pydantic ValidationError and PostmortemError
+            ) as err:
+                # One bad record is reported and retried next run; it never blocks the others
+                logger.error("learning_failed", forecast_id=forecast_id, error=str(err))
+                errors.append(f"{forecast_id}: {err}")
+        return postmortems, tickers, errors
+
+    def apply(self, postmortems: list[PostMortem], now: datetime) -> LearningReport:
+        """Record decision outcomes, apply lessons and store each postmortem, then retire
+        stale lessons. ``report.postmortems`` holds only the postmortems that were stored."""
+        report = LearningReport()
+        for postmortem in postmortems:
+            forecast_id = postmortem.forecast_id
+            try:
+                snapshot = self.snapshot_store.get(forecast_id)
+                outcome = self.outcome_store.get(forecast_id)
+                if snapshot is None or outcome is None:
+                    raise LearningStoreError("forecast or its outcome is no longer readable")
                 report.decision_outcomes_recorded += self.learning_store.record_decision_outcomes(
                     decision_outcomes_for(
                         snapshot, outcome, cause=postmortem.primary_cause, now=now
@@ -160,15 +205,15 @@ class LearningCycle:
                 report.lesson_actions += apply_lessons(
                     self.memory_store, snapshot, outcome, postmortem, now=now
                 )
+                # Stored last: the postmortem marks the forecast as processed
                 self.learning_store.save_postmortem(postmortem)
             except (
                 ForecastSnapshotError,
                 LearningStoreError,
                 MemoryStoreError,
                 sqlite3.Error,
-                ValueError,  # includes pydantic ValidationError and PostmortemError
+                ValueError,
             ) as err:
-                # One bad record is reported and retried next run; it never blocks the others
                 logger.error("learning_failed", forecast_id=forecast_id, error=str(err))
                 report.errors.append(f"{forecast_id}: {err}")
                 continue
@@ -178,10 +223,17 @@ class LearningCycle:
             report.lesson_actions += retire_stale_lessons(self.memory_store, now=now)
         except (MemoryStoreError, sqlite3.Error) as err:
             report.errors.append(f"lesson retirement: {err}")
+        return report
 
-        for name in sorted(tickers):
+    def recalibrate(
+        self, tickers: Iterable[str], now: datetime
+    ) -> tuple[list[CalibrationUpdate], list[str]]:
+        """Re-estimate each ticker's calibration; returns the updates and errors."""
+        updates: list[CalibrationUpdate] = []
+        errors: list[str] = []
+        for name in tickers:
             try:
-                report.calibration_updates.append(
+                updates.append(
                     update_calibration(
                         name,
                         now=now,
@@ -192,5 +244,5 @@ class LearningCycle:
                 )
             except (ForecastSnapshotError, LearningStoreError, sqlite3.Error, ValueError) as err:
                 logger.error("calibration_failed", ticker=name, error=str(err))
-                report.errors.append(f"calibration {name}: {err}")
-        return report
+                errors.append(f"calibration {name}: {err}")
+        return updates, errors

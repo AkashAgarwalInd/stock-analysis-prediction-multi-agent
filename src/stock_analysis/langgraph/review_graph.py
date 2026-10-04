@@ -1,0 +1,296 @@
+"""Plan.md Phase 15: the review graph, run independently of the forecast graph.
+
+Topology (one LangGraph node per step, strictly sequential)::
+
+    find_matured → score → postmortem → learning → calibration
+      → scorecards → track_record → END
+
+- ``find_matured``: original forecasts whose target session has completed and
+  that have no outcome yet (``OutcomeReviewer.find_matured``).
+- ``score``: fetch actual prices for each forecast window and store scored or
+  invalid outcomes; unresolved ones (and any that failed) are retried next run.
+- ``postmortem``: diagnose every scored forecast without a postmortem (oldest
+  first, not only those scored in this run).
+- ``learning``: record decision outcomes, apply lessons and store each
+  postmortem last (the "processed" marker), then retire stale lessons.
+- ``calibration``: re-estimate the calibration of every affected ticker and
+  compare the benchmarks it is judged on.
+- ``scorecards`` / ``track_record``: recomputed from the immutable records as
+  of the review time (nothing is stored; the forecast graph does not read them).
+
+Every step is point-in-time (``ReviewState.run_at`` replaces the wall clock),
+and a failing step records its error in ``ReviewState.errors`` instead of
+raising, so a review never blocks whatever runs after it.
+"""
+
+from __future__ import annotations
+
+import itertools
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any, Optional, Protocol
+
+from langgraph.graph import END, StateGraph
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+
+from stock_analysis.database import (
+    ForecastSnapshotError,
+    ForecastSnapshotStore,
+    LearningStore,
+    LearningStoreError,
+    MemoryStore,
+    MemoryStoreError,
+    OutcomeStore,
+    OutcomeStoreError,
+    get_database,
+)
+from stock_analysis.learning import (
+    HindsightNewsSource,
+    LearningCycle,
+    LessonAction,
+    build_evaluation,
+    build_scorecards,
+    compare_benchmarks,
+)
+from stock_analysis.logging import get_logger
+from stock_analysis.market.calendar import TradingCalendar
+from stock_analysis.review import OutcomeReviewer, PriceSource
+from stock_analysis.schemas.learning import BenchmarkComparison, CalibrationUpdate, PostMortem
+from stock_analysis.schemas.outcome import ForecastOutcome
+from stock_analysis.schemas.scorecard import Scorecards
+from stock_analysis.schemas.track_record import EvaluationReport
+
+logger = get_logger(__name__)
+
+REVIEW_STEPS = (
+    "find_matured",
+    "score",
+    "postmortem",
+    "learning",
+    "calibration",
+    "scorecards",
+    "track_record",
+)
+
+# Errors a review step reports instead of raising (ValueError includes pydantic's
+# ValidationError and PostmortemError)
+_STEP_ERRORS = (
+    ForecastSnapshotError,
+    OutcomeStoreError,
+    LearningStoreError,
+    MemoryStoreError,
+    sqlite3.Error,
+    ValueError,
+)
+
+
+class ReviewState(BaseModel):
+    """State of one review run. Inputs are ``run_at`` and the optional ``ticker``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_at: AwareDatetime
+    ticker: Optional[str] = None
+
+    matured_forecast_ids: list[str] = Field(default_factory=list)
+    # Newly scored, invalid and unresolved (not stored, retried next run) outcomes
+    outcomes: list[ForecastOutcome] = Field(default_factory=list)
+    # Diagnosed by ``postmortem``; after ``learning`` only those that were stored
+    postmortems: list[PostMortem] = Field(default_factory=list)
+    lesson_actions: list[LessonAction] = Field(default_factory=list)
+    decision_outcomes_recorded: int = 0
+    recalibrate_tickers: list[str] = Field(default_factory=list)
+    calibration_updates: list[CalibrationUpdate] = Field(default_factory=list)
+    benchmarks: dict[str, BenchmarkComparison] = Field(default_factory=dict)
+    scorecards: Optional[Scorecards] = None
+    evaluation: Optional[EvaluationReport] = None
+
+    completed_steps: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class Node(Protocol):
+    """A review graph node (LangGraph passes the state as ``state``)."""
+
+    def __call__(self, state: ReviewState) -> dict[str, Any]: ...
+
+
+def _step(name: str, body: Callable[[ReviewState], dict[str, Any]]) -> Node:
+    """Wrap a step so a failure is recorded in ``errors`` and the review continues."""
+
+    def node(state: ReviewState) -> dict[str, Any]:
+        try:
+            update = body(state)
+        except _STEP_ERRORS as err:
+            logger.error("review_step_failed", step=name, ticker=state.ticker, error=str(err))
+            return {"errors": [*state.errors, f"{name}: {err}"]}
+        errors = update.pop("errors", [])
+        return {
+            **update,
+            "completed_steps": [*state.completed_steps, name],
+            "errors": [*state.errors, *errors],
+        }
+
+    node.__name__ = f"{name}_node"
+    return node
+
+
+def build_review_graph(
+    snapshot_store: ForecastSnapshotStore,
+    outcome_store: OutcomeStore,
+    memory_store: MemoryStore,
+    learning_store: LearningStore,
+    *,
+    price_source: Optional[PriceSource] = None,
+    calendar: Optional[TradingCalendar] = None,
+    llm_factory: Any = None,
+    news_source: Optional[HindsightNewsSource] = None,
+) -> StateGraph[ReviewState]:
+    """Build the review graph over the given stores.
+
+    ``price_source`` defaults to yfinance and ``calendar`` to the NSE calendar;
+    without ``llm_factory`` postmortems are rules only (no LLM call), and
+    ``news_source`` adds hindsight news to them.
+    """
+    reviewer = OutcomeReviewer(snapshot_store, outcome_store, price_source, calendar)
+    cycle = LearningCycle(
+        snapshot_store,
+        outcome_store,
+        memory_store,
+        learning_store,
+        llm_factory=llm_factory,
+        news_source=news_source,
+    )
+
+    def find_matured(state: ReviewState) -> dict[str, Any]:
+        return {"matured_forecast_ids": reviewer.find_matured(state.run_at, ticker=state.ticker)}
+
+    def score(state: ReviewState) -> dict[str, Any]:
+        outcomes, errors = reviewer.score(state.matured_forecast_ids, state.run_at)
+        return {"outcomes": outcomes, "errors": errors}
+
+    def postmortem(state: ReviewState) -> dict[str, Any]:
+        postmortems, tickers, errors = cycle.diagnose(state.run_at, ticker=state.ticker)
+        return {
+            "postmortems": postmortems,
+            "recalibrate_tickers": sorted(tickers),
+            "errors": errors,
+        }
+
+    def learning(state: ReviewState) -> dict[str, Any]:
+        report = cycle.apply(state.postmortems, state.run_at)
+        return {
+            "postmortems": report.postmortems,
+            "lesson_actions": report.lesson_actions,
+            "decision_outcomes_recorded": report.decision_outcomes_recorded,
+            "errors": report.errors,
+        }
+
+    def calibration(state: ReviewState) -> dict[str, Any]:
+        # The requested ticker is recalibrated even when the postmortem step failed
+        tickers = set(state.recalibrate_tickers) | ({state.ticker} if state.ticker else set())
+        updates, errors = cycle.recalibrate(sorted(tickers), state.run_at)
+        benchmarks = {}
+        for update in updates:
+            try:
+                ids = learning_store.scored_forecast_ids(
+                    update.ticker, before=state.run_at, limit=10_000
+                )
+                benchmarks[update.ticker] = compare_benchmarks(
+                    [o for fid in ids if (o := outcome_store.get(fid)) is not None]
+                )
+            except _STEP_ERRORS as err:
+                # The update is already stored; only its benchmark comparison is missing
+                logger.error("benchmarks_failed", ticker=update.ticker, error=str(err))
+                errors.append(f"benchmarks {update.ticker}: {err}")
+        return {"calibration_updates": updates, "benchmarks": benchmarks, "errors": errors}
+
+    def scorecards(state: ReviewState) -> dict[str, Any]:
+        cards = build_scorecards(
+            outcome_store, learning_store, as_of=state.run_at, ticker=state.ticker
+        )
+        return {"scorecards": cards}
+
+    def track_record(state: ReviewState) -> dict[str, Any]:
+        evaluation = build_evaluation(
+            snapshot_store, outcome_store, as_of=state.run_at, ticker=state.ticker
+        )
+        return {"evaluation": evaluation}
+
+    bodies = {
+        "find_matured": find_matured,
+        "score": score,
+        "postmortem": postmortem,
+        "learning": learning,
+        "calibration": calibration,
+        "scorecards": scorecards,
+        "track_record": track_record,
+    }
+    graph = StateGraph(ReviewState)
+    for name in REVIEW_STEPS:
+        graph.add_node(name, _step(name, bodies[name]))
+    graph.set_entry_point(REVIEW_STEPS[0])
+    for current, following in itertools.pairwise(REVIEW_STEPS):
+        graph.add_edge(current, following)
+    graph.add_edge(REVIEW_STEPS[-1], END)
+    return graph
+
+
+def compile_review_graph(
+    snapshot_store: ForecastSnapshotStore,
+    outcome_store: OutcomeStore,
+    memory_store: MemoryStore,
+    learning_store: LearningStore,
+    **kwargs: Any,
+) -> Any:
+    """Compile ``build_review_graph`` (same arguments)."""
+    return build_review_graph(
+        snapshot_store, outcome_store, memory_store, learning_store, **kwargs
+    ).compile()
+
+
+def invoke_review(graph: Any, run_at: datetime, *, ticker: Optional[str] = None) -> ReviewState:
+    """Run a compiled review graph at ``run_at`` and return its final state."""
+    result = graph.invoke(ReviewState(run_at=run_at, ticker=ticker))
+    return result if isinstance(result, ReviewState) else ReviewState(**result)
+
+
+def run_review(
+    run_at: datetime,
+    *,
+    ticker: Optional[str] = None,
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+    outcome_store: Optional[OutcomeStore] = None,
+    memory_store: Optional[MemoryStore] = None,
+    learning_store: Optional[LearningStore] = None,
+    **kwargs: Any,
+) -> ReviewState:
+    """Production entry point: review matured forecasts and summarize the track record.
+
+    Stores default to the application database; ``kwargs`` go to
+    ``build_review_graph`` (price source, calendar, LLM factory, news source).
+
+    Raises:
+        ForecastSnapshotError, OutcomeStoreError, MemoryStoreError, LearningStoreError:
+            the corresponding tables are missing.
+    """
+    snapshot_store = snapshot_store or ForecastSnapshotStore(get_database())
+    outcome_store = outcome_store or OutcomeStore(get_database())
+    memory_store = memory_store or MemoryStore(get_database())
+    learning_store = learning_store or LearningStore(get_database())
+    for store in (snapshot_store, outcome_store, memory_store, learning_store):
+        store.ensure_schema()
+    graph = compile_review_graph(
+        snapshot_store, outcome_store, memory_store, learning_store, **kwargs
+    )
+    state = invoke_review(graph, run_at, ticker=ticker)
+    logger.info(
+        "review_completed",
+        ticker=ticker,
+        matured=len(state.matured_forecast_ids),
+        postmortems=len(state.postmortems),
+        calibration_changed=sum(u.changed for u in state.calibration_updates),
+        errors=len(state.errors),
+    )
+    return state

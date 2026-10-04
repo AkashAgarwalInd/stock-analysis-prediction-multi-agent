@@ -16,6 +16,7 @@ from stock_analysis.database import (
     LearningStore,
     LearningStoreError,
     MemoryStore,
+    MemoryStoreError,
     OutcomeStore,
     OutcomeStoreError,
     close_database,
@@ -23,11 +24,9 @@ from stock_analysis.database import (
     run_migrations,
 )
 from stock_analysis.learning import (
-    LearningCycle,
     RssHindsightNewsSource,
     build_evaluation,
     build_scorecards,
-    compare_benchmarks,
     render_adaptation,
     render_calibration_history,
     render_lesson_actions,
@@ -37,7 +36,7 @@ from stock_analysis.learning import (
     render_track_record,
 )
 from stock_analysis.logging import configure_logging, get_logger
-from stock_analysis.review import OutcomeReviewer, render_last_forecast_vs_actual
+from stock_analysis.review import render_last_forecast_vs_actual
 
 app = typer.Typer(
     name="stock-analysis",
@@ -90,44 +89,54 @@ def review(
         help="LLM postmortem with hindsight news (otherwise rules only, no network)",
     ),
 ) -> None:
-    """Score matured forecasts, diagnose them, update lessons and calibration."""
+    """Run the review graph: score matured forecasts, diagnose them, update lessons and
+    calibration, then show the scorecards and track record."""
+    from stock_analysis.langgraph.review_graph import run_review
+
     db = init_database()
     try:
         snapshots, outcomes = ForecastSnapshotStore(db), OutcomeStore(db)
         memory, learning = MemoryStore(db), LearningStore(db)
-        for store in (snapshots, outcomes, memory, learning):
-            store.ensure_schema()
-        now = datetime.now(UTC)
-        results = OutcomeReviewer(snapshots, outcomes).review_matured(now, ticker=ticker)
-        if not results:
-            console.print("No matured forecasts awaiting evaluation.")
-        for outcome in results:
-            snapshot = snapshots.get(outcome.forecast_id)
-            if snapshot is not None:
-                console.print(render_last_forecast_vs_actual(snapshot, outcome), markup=False)
-
         llm_factory = news_source = None
         if llm:
             from stock_analysis.llm.factory import get_llm_factory
 
             llm_factory, news_source = get_llm_factory(), RssHindsightNewsSource()
-        report = LearningCycle(
-            snapshots, outcomes, memory, learning, llm_factory=llm_factory, news_source=news_source
-        ).run(now, ticker=ticker)
-        for postmortem in report.postmortems:
+        base = _base_ticker(ticker)
+        state = run_review(
+            datetime.now(UTC),
+            ticker=base,
+            snapshot_store=snapshots,
+            outcome_store=outcomes,
+            memory_store=memory,
+            learning_store=learning,
+            llm_factory=llm_factory,
+            news_source=news_source,
+        )
+        if not state.outcomes:
+            console.print("No matured forecasts awaiting evaluation.")
+        for outcome in state.outcomes:
+            snapshot = snapshots.get(outcome.forecast_id)
+            if snapshot is not None:
+                console.print(render_last_forecast_vs_actual(snapshot, outcome), markup=False)
+        for postmortem in state.postmortems:
             console.print(f"Forecast `{postmortem.forecast_id}`", markup=False)
             console.print(render_postmortem(postmortem), markup=False)
-        if report.lesson_actions:
-            console.print(render_lesson_actions(report.lesson_actions), markup=False)
-        for update in report.calibration_updates:
-            scored = [
-                o
-                for fid in learning.scored_forecast_ids(update.ticker, before=now, limit=10_000)
-                if (o := outcomes.get(fid)) is not None
-            ]
-            console.print(render_adaptation(update, compare_benchmarks(scored)), markup=False)
-        for error in report.errors:
-            console.print(f"Learning error: {error}", markup=False)
+        if state.lesson_actions:
+            console.print(render_lesson_actions(state.lesson_actions), markup=False)
+        for update in state.calibration_updates:
+            console.print(
+                render_adaptation(update, state.benchmarks.get(update.ticker)), markup=False
+            )
+        if state.scorecards is not None:
+            console.print(render_scorecards(state.scorecards), markup=False)
+        if state.evaluation is not None:
+            console.print(render_track_record(state.evaluation.track_record), markup=False)
+        for error in state.errors:
+            console.print(f"Review error: {error}", markup=False)
+    except (ForecastSnapshotError, OutcomeStoreError, LearningStoreError, MemoryStoreError) as err:
+        console.print(f"Review failed: {err}", markup=False)
+        raise typer.Exit(1) from err
     finally:
         close_database()
 

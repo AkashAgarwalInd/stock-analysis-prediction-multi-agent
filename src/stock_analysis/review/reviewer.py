@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime
 from typing import Optional
 
@@ -36,6 +37,11 @@ class OutcomeReviewer:
         self.price_source = price_source or YFinancePriceSource()
         self.calendar = calendar or get_trading_calendar()
 
+    def find_matured(self, now: datetime, *, ticker: Optional[str] = None) -> list[str]:
+        """Original forecasts whose target session has completed and that have no outcome yet."""
+        completed = last_completed_trading_date(now, self.calendar)
+        return self.outcome_store.matured_unevaluated(completed, ticker=ticker)
+
     def review_matured(
         self, now: datetime, *, ticker: Optional[str] = None
     ) -> list[ForecastOutcome]:
@@ -43,10 +49,20 @@ class OutcomeReviewer:
 
         One forecast's failure is logged and skipped so it never blocks the others.
         """
-        completed = last_completed_trading_date(now, self.calendar)
+        return self.score(self.find_matured(now, ticker=ticker), now)[0]
+
+    def score(
+        self, forecast_ids: list[str], now: datetime
+    ) -> tuple[list[ForecastOutcome], list[str]]:
+        """Score ``forecast_ids`` (from ``find_matured``) against actual prices at ``now``.
+
+        Returns the outcomes (scored and invalid ones are stored) and one error per
+        forecast that could not be reviewed; those are retried next run.
+        """
         nifty_cache: dict[tuple[date, date], PriceSeries] = {}
         results = []
-        for forecast_id in self.outcome_store.matured_unevaluated(completed, ticker=ticker):
+        errors: list[str] = []
+        for forecast_id in forecast_ids:
             try:
                 snapshot = self.snapshot_store.get(forecast_id)
                 if snapshot is None:
@@ -61,8 +77,14 @@ class OutcomeReviewer:
                 )
                 if outcome.status != OutcomeStatus.UNRESOLVED:
                     self.outcome_store.save(outcome)
-            except (ForecastSnapshotError, OutcomeStoreError) as err:
+            except (
+                ForecastSnapshotError,
+                OutcomeStoreError,
+                sqlite3.Error,
+                ValueError,  # includes pydantic ValidationError
+            ) as err:
                 logger.error("forecast_review_failed", forecast_id=forecast_id, error=str(err))
+                errors.append(f"{forecast_id}: {err}")
                 continue
             logger.info(
                 "forecast_reviewed",
@@ -71,4 +93,4 @@ class OutcomeReviewer:
                 reason=outcome.invalid_reason,
             )
             results.append(outcome)
-        return results
+        return results, errors

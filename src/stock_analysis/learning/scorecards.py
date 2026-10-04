@@ -160,7 +160,8 @@ def _t95(df: int) -> float:
     )
 
 
-def _mean_ci(values: list[float]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+def mean_ci(values: list[float]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Mean with a two-sided 95% Student-t interval (no interval below two values)."""
     if not values:
         return None, None, None
     mean = statistics.fmean(values)
@@ -210,7 +211,7 @@ def decision_evaluations(
         ]
         calls = [o.direction_correct for o in items if o.direction_correct is not None]
         bands = [o.in_80pct_band for o in items if o.in_80pct_band is not None]
-        mean, low, high = _mean_ci(added)
+        mean, low, high = mean_ci(added)
         n_adjusted = sum(o.adjustment_applied for o in items)
         evaluations.append(
             DecisionEvaluation(

@@ -61,7 +61,11 @@ class Settings(BaseSettings):
     # Plan.md Phase 13 scorecards (§24): evaluation only; nothing is reweighted automatically
     min_samples_analyst_weights: int = 20
     analyst_weighting_enabled: bool = False  # feature flag; no weighting is implemented yet
-    min_samples_decision_evaluation: int = 20
+    min_samples_decision_evaluation: int = 20  # also: before the track record ranks variants
+
+    # Plan.md Phase 14 probability calibration (§27)
+    probability_calibration_buckets: int = Field(default=10, ge=1, le=100)
+    min_samples_probability_calibration: int = 20
 
     @property
     def database_url(self) -> str:

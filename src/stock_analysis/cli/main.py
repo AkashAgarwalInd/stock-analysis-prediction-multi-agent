@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Optional
@@ -9,6 +11,7 @@ from rich.table import Table
 from stock_analysis.config import get_settings
 from stock_analysis.database import (
     Database,
+    ForecastSnapshotError,
     ForecastSnapshotStore,
     LearningStore,
     LearningStoreError,
@@ -22,12 +25,16 @@ from stock_analysis.database import (
 from stock_analysis.learning import (
     LearningCycle,
     RssHindsightNewsSource,
+    build_evaluation,
     build_scorecards,
     compare_benchmarks,
     render_adaptation,
+    render_calibration_history,
     render_lesson_actions,
     render_postmortem,
+    render_probability_calibration,
     render_scorecards,
+    render_track_record,
 )
 from stock_analysis.logging import configure_logging, get_logger
 from stock_analysis.review import OutcomeReviewer, render_last_forecast_vs_actual
@@ -125,35 +132,99 @@ def review(
         close_database()
 
 
-@app.command()
-def scorecard(
-    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
-    database: Optional[str] = typer.Option(
-        None, "--database", help="Database to read, e.g. a backtest's (default: the app database)"
-    ),
-) -> None:
-    """Show analyst, regime and decision scorecards (evaluation only)."""
+_DATABASE_HELP = "Database to read, e.g. a backtest's (default: the app database)"
+
+
+def _base_ticker(ticker: Optional[str]) -> Optional[str]:
+    """Tickers are stored without the exchange suffix (RELIANCE, not RELIANCE.NS)."""
+    return ticker.upper().split(".")[0] if ticker else None
+
+
+@contextmanager
+def _read_database(database: Optional[str]) -> Iterator[Database]:
+    """Open ``database`` (or the app database) with the evaluation tables checked."""
     if database and not Path(database).exists():
         console.print(f"No database at {database}", markup=False)
         raise typer.Exit(1)
     db = Database(Path(database)) if database else init_database()
     try:
-        outcomes, learning = OutcomeStore(db), LearningStore(db)
         try:
-            outcomes.ensure_schema()
-            learning.ensure_schema()
-        except (OutcomeStoreError, LearningStoreError) as err:
+            for store in (ForecastSnapshotStore(db), OutcomeStore(db), LearningStore(db)):
+                store.ensure_schema()
+        except (ForecastSnapshotError, OutcomeStoreError, LearningStoreError) as err:
             console.print(str(err), markup=False)
             raise typer.Exit(1) from err
-        # Tickers are stored without the exchange suffix (RELIANCE, not RELIANCE.NS)
-        base = ticker.upper().split(".")[0] if ticker else None
-        cards = build_scorecards(outcomes, learning, as_of=datetime.now(UTC), ticker=base)
-        console.print(render_scorecards(cards), markup=False)
+        try:
+            yield db
+        except ForecastSnapshotError as err:  # e.g. a stored forecast failed its hash check
+            console.print(f"Cannot read stored forecasts: {err}", markup=False)
+            raise typer.Exit(1) from err
     finally:
         if database:
             db.close()
         else:
             close_database()
+
+
+@app.command()
+def scorecard(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    database: Optional[str] = typer.Option(None, "--database", help=_DATABASE_HELP),
+) -> None:
+    """Show analyst, regime and decision scorecards (evaluation only)."""
+    with _read_database(database) as db:
+        cards = build_scorecards(
+            OutcomeStore(db),
+            LearningStore(db),
+            as_of=datetime.now(UTC),
+            ticker=_base_ticker(ticker),
+        )
+        console.print(render_scorecards(cards), markup=False)
+
+
+@app.command()
+def evaluate(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    database: Optional[str] = typer.Option(None, "--database", help=_DATABASE_HELP),
+) -> None:
+    """Show the forecast track record against the naive and quant benchmarks."""
+    with _read_database(database) as db:
+        base = _base_ticker(ticker)
+        report = build_evaluation(
+            ForecastSnapshotStore(db), OutcomeStore(db), as_of=datetime.now(UTC), ticker=base
+        )
+        console.print(render_track_record(report.track_record), markup=False)
+        final = [c for c in report.probability_calibration if c.variant == "final"]
+        console.print(
+            render_probability_calibration(final, n_buckets=report.n_buckets, ticker=base),
+            markup=False,
+        )
+
+
+@app.command()
+def calibration(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    database: Optional[str] = typer.Option(None, "--database", help=_DATABASE_HELP),
+) -> None:
+    """Show calibration versions and predicted probability vs observed frequency."""
+    with _read_database(database) as db:
+        base = _base_ticker(ticker)
+        learning = LearningStore(db)
+        tickers = [base] if base else learning.calibrated_tickers()
+        for name in tickers:
+            console.print(
+                render_calibration_history(name, learning.calibration_history(name)),
+                markup=False,
+            )
+        report = build_evaluation(
+            ForecastSnapshotStore(db), OutcomeStore(db), as_of=datetime.now(UTC), ticker=base
+        )
+        console.print(
+            render_probability_calibration(
+                report.probability_calibration, n_buckets=report.n_buckets, ticker=base
+            ),
+            markup=False,
+        )
 
 
 @app.command()

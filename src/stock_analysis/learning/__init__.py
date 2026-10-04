@@ -12,6 +12,14 @@ from stock_analysis.learning.cycle import (
     LearningReport,
     decision_outcomes_for,
 )
+from stock_analysis.learning.evaluation import (
+    build_evaluation,
+    build_track_record,
+    evaluate_forecast,
+    load_evaluated_forecasts,
+    probability_calibration,
+    reliability_table,
+)
 from stock_analysis.learning.lessons import LessonAction, apply_lessons, retire_stale_lessons
 from stock_analysis.learning.news import RssHindsightNewsSource
 from stock_analysis.learning.postmortem import (
@@ -23,9 +31,12 @@ from stock_analysis.learning.postmortem import (
 )
 from stock_analysis.learning.report import (
     render_adaptation,
+    render_calibration_history,
     render_lesson_actions,
     render_postmortem,
+    render_probability_calibration,
     render_scorecards,
+    render_track_record,
 )
 from stock_analysis.learning.scorecards import (
     analyst_scorecards,
@@ -43,7 +54,9 @@ __all__ = [
     "RssHindsightNewsSource",
     "analyst_scorecards",
     "apply_lessons",
+    "build_evaluation",
     "build_scorecards",
+    "build_track_record",
     "build_postmortem_facts",
     "build_postmortem_prompt",
     "classify_deterministically",
@@ -51,14 +64,21 @@ __all__ = [
     "decision_evaluations",
     "decision_outcomes_for",
     "estimate_calibration",
+    "evaluate_forecast",
     "group_scores",
     "hit_rate",
     "is_expected_noise",
+    "load_evaluated_forecasts",
     "observation_from",
+    "probability_calibration",
+    "reliability_table",
     "render_adaptation",
+    "render_calibration_history",
     "render_lesson_actions",
     "render_postmortem",
+    "render_probability_calibration",
     "render_scorecards",
+    "render_track_record",
     "retire_stale_lessons",
     "run_postmortem",
     "update_calibration",

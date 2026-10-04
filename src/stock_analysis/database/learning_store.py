@@ -128,6 +128,11 @@ class LearningStore:
         )
         return [self._calibration(r) for r in rows]
 
+    def calibrated_tickers(self) -> list[str]:
+        """Tickers with at least one stored calibration version, alphabetically."""
+        rows = self.db.fetchall("SELECT DISTINCT ticker FROM calibration_params ORDER BY ticker")
+        return [r["ticker"] for r in rows]
+
     @staticmethod
     def _calibration(row: sqlite3.Row) -> CalibrationParams:
         data = dict(row)

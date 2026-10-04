@@ -51,7 +51,12 @@ from stock_analysis.database import (
 from stock_analysis.database.forecast_store import ForecastSnapshotError
 from stock_analysis.database.migrations import upgrade_database
 from stock_analysis.langgraph.workflow import compile_graph
-from stock_analysis.learning import LearningCycle, build_scorecards, compare_benchmarks
+from stock_analysis.learning import (
+    LearningCycle,
+    build_evaluation,
+    build_scorecards,
+    compare_benchmarks,
+)
 from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar, get_trading_calendar
 from stock_analysis.review import OutcomeReviewer, last_completed_trading_date
@@ -60,6 +65,7 @@ from stock_analysis.schemas.graph_state import GraphState
 from stock_analysis.schemas.learning import BenchmarkComparison, CalibrationParams
 from stock_analysis.schemas.outcome import OutcomeStatus
 from stock_analysis.schemas.scorecard import Scorecards
+from stock_analysis.schemas.track_record import EvaluationReport
 from stock_analysis.snapshots.builder import IST, NSE_CLOSE_IST
 
 logger = get_logger(__name__)
@@ -145,6 +151,7 @@ class BacktestResult(BaseModel):
     active_lessons: int
     benchmarks: BenchmarkComparison
     scorecards: Scorecards
+    evaluation: EvaluationReport
     errors: list[str] = Field(default_factory=list)
 
 
@@ -382,6 +389,7 @@ def _run(
         active_lessons=len(memory.active_lessons(base, None, as_of=final_time, limit=1000)),
         benchmarks=compare_benchmarks(scored),
         scorecards=build_scorecards(outcomes, learning, as_of=final_time, ticker=base),
+        evaluation=build_evaluation(snapshots, outcomes, as_of=final_time, ticker=base),
         errors=errors,
     )
 

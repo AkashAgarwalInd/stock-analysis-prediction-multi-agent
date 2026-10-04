@@ -188,6 +188,10 @@ class TestBacktestRun:
         assert "may already know how these dates played out" in text
         assert "## Scorecards for RELIANCE" in text
         assert result.scorecards.n_forecasts == WEEKS
+        assert "## Forecast track record for RELIANCE" in text
+        assert "| Naive flat |" in text
+        assert "## Probability calibration for RELIANCE" in text
+        assert result.evaluation.track_record.n_forecasts == WEEKS
 
     def test_report_cells_cannot_break_the_table(self, swing_run):
         result, _, _ = swing_run

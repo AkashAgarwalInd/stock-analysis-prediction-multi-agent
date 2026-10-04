@@ -16,7 +16,8 @@ Topology (one LangGraph node per step, strictly sequential)::
 - ``calibration``: re-estimate the calibration of every affected ticker and
   compare the benchmarks it is judged on.
 - ``scorecards`` / ``track_record``: recomputed from the immutable records as
-  of the review time (nothing is stored; the forecast graph does not read them).
+  of the review time (nothing is stored; the forecast graph's memory loader
+  recomputes them as of its own clock).
 
 Every step is point-in-time (``ReviewState.run_at`` replaces the wall clock),
 and a failing step records its error in ``ReviewState.errors`` instead of
@@ -57,7 +58,8 @@ from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar
 from stock_analysis.review import OutcomeReviewer, PriceSource
 from stock_analysis.schemas.learning import BenchmarkComparison, CalibrationUpdate, PostMortem
-from stock_analysis.schemas.outcome import ForecastOutcome
+from stock_analysis.schemas.memory import PreRunReview
+from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeStatus
 from stock_analysis.schemas.scorecard import Scorecards
 from stock_analysis.schemas.track_record import EvaluationReport
 
@@ -108,6 +110,29 @@ class ReviewState(BaseModel):
 
     completed_steps: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+    def summary(self) -> PreRunReview:
+        """The compact record a forecast run keeps of the review it ran first."""
+        statuses = [o.status for o in self.outcomes]
+        stored = [
+            u.stored.version
+            for u in self.calibration_updates
+            if u.stored is not None and (self.ticker is None or u.ticker == self.ticker)
+        ]
+        return PreRunReview(
+            run_at=self.run_at,
+            matured=len(self.matured_forecast_ids),
+            scored=statuses.count(OutcomeStatus.SCORED),
+            invalid=statuses.count(OutcomeStatus.INVALID),
+            unresolved=statuses.count(OutcomeStatus.UNRESOLVED),
+            postmortems=len(self.postmortems),
+            lessons_created=sum(a.action == "created" for a in self.lesson_actions),
+            lessons_updated=sum(
+                a.action in ("confirmed", "contradicted", "retired") for a in self.lesson_actions
+            ),
+            calibration_version=stored[-1] if stored else None,
+            errors=[e[:300] for e in self.errors],
+        )
 
 
 class Node(Protocol):
@@ -294,3 +319,32 @@ def run_review(
         errors=len(state.errors),
     )
     return state
+
+
+def make_pre_run_reviewer(
+    snapshot_store: ForecastSnapshotStore,
+    outcome_store: OutcomeStore,
+    memory_store: MemoryStore,
+    learning_store: LearningStore,
+    **kwargs: Any,
+) -> Callable[[datetime, str], PreRunReview]:
+    """Plan.md §5.2 / Phase 16: a reviewer for the forecast graph's ``review_matured`` node.
+
+    The review graph is compiled once (``kwargs`` as for ``build_review_graph``)
+    and run for the forecast's ticker at the forecast's clock.
+    """
+    graph = compile_review_graph(
+        snapshot_store, outcome_store, memory_store, learning_store, **kwargs
+    )
+
+    def review(run_at: datetime, ticker: str) -> PreRunReview:
+        state = invoke_review(graph, run_at, ticker=ticker)
+        logger.info(
+            "pre_run_review_completed",
+            ticker=ticker,
+            matured=len(state.matured_forecast_ids),
+            errors=len(state.errors),
+        )
+        return state.summary()
+
+    return review

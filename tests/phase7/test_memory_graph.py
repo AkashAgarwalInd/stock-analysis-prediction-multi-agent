@@ -10,6 +10,10 @@ from stock_analysis.langgraph.workflow import format_prior_context
 from stock_analysis.schemas.memory import LessonCandidate, LessonEvidenceKind, MemoryContext
 from stock_analysis.snapshots import find_unsupported_numbers
 from tests.forecast_helpers import FakeLLM, run_graph
+from tests.outcome_helpers import FakePriceSource
+
+# The runner reviews matured forecasts first; keep that review offline
+NO_PRICES = FakePriceSource({})
 
 
 @pytest.mark.usefixtures("price_history")
@@ -106,8 +110,8 @@ def test_run_forecast_carries_memory_between_runs(migrated_db, initial_state):
 
     close_database()
     try:
-        first = run_forecast(initial_state, llm_factory=FakeLLM("valid"))
-        second = run_forecast(initial_state, llm_factory=FakeLLM("valid"))
+        first = run_forecast(initial_state, llm_factory=FakeLLM("valid"), price_source=NO_PRICES)
+        second = run_forecast(initial_state, llm_factory=FakeLLM("valid"), price_source=NO_PRICES)
     finally:
         close_database()
 

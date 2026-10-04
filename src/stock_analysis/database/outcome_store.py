@@ -176,6 +176,19 @@ class OutcomeStore:
             )
         return out
 
+    def latest_evaluated(self, ticker: str, *, before: datetime) -> Optional[ForecastOutcome]:
+        """The newest stored outcome (by target date) of an original ``ticker`` forecast
+        evaluated by ``before`` (point-in-time)."""
+        row = self.db.fetchone(
+            "SELECT o.forecast_id FROM forecast_outcomes o "
+            "JOIN forecast_snapshots s ON s.forecast_id = o.forecast_id "
+            "WHERE s.ticker = ? AND s.version = 1 "
+            "AND julianday(o.evaluated_at) <= julianday(?) "
+            "ORDER BY o.target_date DESC, s.made_at DESC LIMIT 1",
+            (ticker, before.astimezone(UTC).isoformat()),
+        )
+        return self.get(row["forecast_id"]) if row else None
+
     def latest_for_ticker(self, ticker: str) -> Optional[ForecastOutcome]:
         """The most recent stored outcome (by target date) for an original forecast of ``ticker``."""
         row = self.db.fetchone(

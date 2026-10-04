@@ -351,6 +351,7 @@ def _run(
                     snapshots,
                     learning,
                     memory,
+                    outcomes,
                 )
             except (ForecastSnapshotError, ValueError, sqlite3.Error) as err:
                 # One failed week is reported; the simulation continues with the next
@@ -410,6 +411,7 @@ def _forecast_week(
     snapshots: ForecastSnapshotStore,
     learning: LearningStore,
     memory: MemoryStore,
+    outcomes: OutcomeStore,
 ) -> None:
     """Make week k's forecast from the point-in-time view only."""
     view = data.as_of(week.as_of_date)
@@ -422,7 +424,16 @@ def _forecast_week(
         technical_indicators_summary=technical_summary(view, symbol),
         market_context_summary=market_context_summary(view, symbol),
     )
-    graph = compile_graph(llm, snapshots, memory, learning, price_fetcher=view.quant_prices)
+    # The week's review already ran (at the previous target's data time); the
+    # graph only loads what it stored, as of this forecast's clock
+    graph = compile_graph(
+        llm,
+        snapshots,
+        memory,
+        learning,
+        price_fetcher=view.quant_prices,
+        outcome_store=outcomes,
+    )
     final = GraphState(**graph.invoke(state))
     if not final.snapshot_persisted or final.forecast_id is None:
         forecast = final.final_forecast or {}

@@ -13,7 +13,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from stock_analysis.schemas.forecast_pipeline import ForecastAdjustmentType
-from stock_analysis.schemas.memory import MemoryContext
+from stock_analysis.schemas.memory import LastReview, MemoryContext, PreRunReview
 from stock_analysis.schemas.snapshot import ForecastSnapshot
 
 DISCLAIMER = (
@@ -136,6 +136,200 @@ def _prior_context_lines(memory: Optional[dict[str, Any]]) -> list[str]:
             f"prices {track.forecasts_scored}; awaiting evaluation "
             f"{track.forecasts_awaiting_outcome}."
         )
+    lines += [f"- Warning: {w}" for w in context.warnings]
+    return lines
+
+
+def _review_run_lines(review: Optional[dict[str, Any]]) -> list[str]:
+    """What the review run just before this forecast did."""
+    if review is None:
+        return []
+    r = PreRunReview.model_validate(review)
+    line = (
+        f"- Review before this run: {r.matured} matured forecasts; {r.scored} scored, "
+        f"{r.invalid} invalid, {r.unresolved} awaiting data; {r.postmortems} postmortems; "
+        f"lessons created {r.lessons_created}, updated {r.lessons_updated}"
+    )
+    if r.calibration_version is not None:
+        line += f"; calibration v{r.calibration_version} stored"
+    return [line, *(f"- Review error: {e}" for e in r.errors)]
+
+
+def _learning_memory(snapshot: ForecastSnapshot) -> Optional[MemoryContext]:
+    """The run's memory if learning context was loaded into it (Plan.md Phase 16)."""
+    memory = snapshot.data_inputs.get("memory")
+    if memory is None:
+        return None
+    context = MemoryContext.model_validate(memory)
+    return context if context.loaded and context.learning_loaded else None
+
+
+def _value_added(value: Optional[float], what: str) -> str:
+    if value is None:
+        return "n/a"
+    if value > 0:
+        return f"{value:+.4f} (lower loss than the {what})"
+    if value < 0:
+        return f"{value:+.4f} (higher loss than the {what})"
+    return f"{value:.4f} (same loss as the {what})"
+
+
+_NOT_LOADED = "- Not available for this run (not configured, or see the warnings under Prior context)."
+
+
+def _last_review_lines(context: MemoryContext) -> list[str]:
+    """Plan.md §57 "Last forecast vs actual", copied from the stored outcome."""
+    if "last_review" not in context.learning_loaded:
+        return [_NOT_LOADED]
+    review: Optional[LastReview] = context.last_review
+    if review is None:
+        return ["- No earlier forecast of this ticker has been evaluated yet."]
+    lines = [
+        f"- Forecast `{review.forecast_id}` (as of {review.as_of_date.isoformat()}, target "
+        f"{review.target_date.isoformat()})"
+    ]
+    if review.status != "scored" or review.actual_close is None:
+        return [*lines, f"- Not evaluated: {review.invalid_reason}"]
+    band = "inside" if review.in_80pct_band else "OUTSIDE"
+    verdict = "correct" if review.direction_correct else "wrong"
+    lines += [
+        "",
+        "| | Forecast | Actual |",
+        "|---|---|---|",
+        f"| P50 / close | {_price(review.p50_price)} | {_price(review.actual_close)} |",
+        f"| P10–P90 range | {_price(review.p10_price)}–{_price(review.p90_price)} | {band} |",
+        f"| Direction | {str(review.predicted_direction).upper()} (P(up) "
+        f"{_prob(review.prob_up)}) | {str(review.realized_direction).upper()} — {verdict} |",
+        "",
+    ]
+    if review.signed_error_pct is not None:
+        lines.append(f"- Error vs P50: {_ret(review.signed_error_pct)}")
+    if review.actual_return_pct is not None:
+        lines.append(f"- Actual return: {_ret(review.actual_return_pct)}")
+    if review.nifty_return_pct is not None:
+        excess = review.excess_vs_nifty_pct
+        lines.append(
+            f"- Nifty: {_ret(review.nifty_return_pct)}; stock vs Nifty: "
+            f"{'n/a' if excess is None else _ret(excess)}"
+        )
+    if review.vol_ratio is not None:
+        lines.append(f"- Realized / predicted volatility: {review.vol_ratio:.2f}x")
+    lines.append(
+        f"- LLM value added: {_value_added(review.llm_value_added, 'quant baseline')}"
+        if review.adjustment_applied
+        else "- LLM value added: none; the LLM did not adjust that forecast"
+    )
+    if review.calibration_version:
+        lines.append(
+            f"- Calibration v{review.calibration_version} value added: "
+            f"{_value_added(review.calibration_value_added, 'uncalibrated quant baseline')}"
+        )
+    if review.primary_cause:
+        noise = " (within expected noise)" if review.expected_noise else ""
+        lines.append(
+            f"- Primary cause: **{review.primary_cause}**{noise} — {review.cause_explanation}"
+        )
+    else:
+        lines.append("- Postmortem: not available yet")
+    lines += [
+        f"- Lesson ({lesson.status.value}, {lesson.evidence_count} confirmations): {lesson.text}"
+        for lesson in review.lessons
+    ]
+    lines.append(
+        "- One observation: it does not show whether the system is generally better or worse."
+    )
+    return lines
+
+
+def _adaptation_lines(context: MemoryContext, snapshot: ForecastSnapshot) -> list[str]:
+    """Plan.md §30 "System adaptation": the calibration in force and how it changed."""
+    a = context.adaptation
+    if a is None or "adaptation" not in context.learning_loaded:
+        return [_NOT_LOADED]
+    if not a.version:
+        metrics = context.track_record.outcome_metrics if context.track_record else None
+        so_far = f" ({metrics.n_forecasts} so far)" if metrics else ""
+        return [
+            "- No calibration yet: the quant baseline stays uncalibrated until at least "
+            f"{a.min_samples} independent forecasts are scored{so_far}."
+        ]
+    lines = [
+        f"- Calibration v{a.version}: volatility multiplier {a.previous_vol_multiplier:.2f} → "
+        f"{a.vol_multiplier:.2f}; P50 shift {_ret(a.previous_p50_bias_shift_pct)} → "
+        f"{_ret(a.p50_bias_shift_pct)} (estimated on {a.n_samples} scored forecasts)"
+    ]
+    if a.changed_since_last_forecast is True:
+        lines.append("- New since the previous forecast of this ticker")
+    elif a.changed_since_last_forecast is False:
+        lines.append("- Unchanged since the previous forecast of this ticker")
+    lines += [f"- Reason: {r}" for r in a.reason]
+    if snapshot.calibration is not None:
+        lines.append(
+            f"- Applied to this forecast (v{snapshot.calibration.version}); the uncalibrated "
+            "baseline is kept as the shadow forecast (see Quant baseline)"
+        )
+    elif not a.applied:
+        lines.append("- Not applied: learning is disabled (LEARNING_ENABLED=false)")
+    return lines
+
+
+def _track_record_lines(context: MemoryContext, regime: str) -> list[str]:
+    """Plan.md §57 "Track record" plus the ticker's scorecards and regime performance."""
+    if "track_record" not in context.learning_loaded:
+        return [_NOT_LOADED]
+    track = context.track_record
+    metrics = track.outcome_metrics if track else None
+    if metrics is None:
+        return ["- No scored forecasts yet."]
+    lines = []
+    for label, w in metrics.distinct_windows():
+        d = w.direction
+        parts = [f"{w.n} forecasts", f"direction {d.hits}/{d.n}"]
+        if d.rate is not None:
+            parts[-1] += f" ({_prob(d.rate)})"
+        if w.coverage_80pct is not None:
+            parts.append(f"P10–P90 coverage {_prob(w.coverage_80pct)}")
+        if w.brier is not None:
+            parts.append(f"Brier {w.brier:.4f}")
+        if w.mean_abs_error_pct is not None:
+            parts.append(f"mean absolute error {w.mean_abs_error_pct:.2f}%")
+        if w.mean_signed_error_pct is not None:
+            parts.append(f"mean signed error {_ret(w.mean_signed_error_pct)}")
+        parts.append(
+            f"LLM value added {w.llm_value_added:+.4f} over {w.n_adjusted} adjusted forecasts"
+            if w.llm_value_added is not None
+            else "no forecast adjusted by the LLM"
+        )
+        lines += [f"- **{label}**: " + "; ".join(parts), f"  - {w.finding}"]
+    lines.append(
+        f"- Fewer than {metrics.min_samples} scored forecasts are not enough to call one "
+        "forecast variant better than another."
+    )
+    cards = context.scorecards
+    if cards is None or not cards.n_forecasts:
+        return lines
+    if cards.analysts:
+        rates = "; ".join(
+            f"{name} {h.hits}/{h.n}" + ("" if h.rate is None else f" ({_prob(h.rate)})")
+            for name, h in cards.analysts.items()
+        )
+        lines.append(
+            f"- Analyst directional hit rates ({cards.n_forecasts} independent scored forecasts; "
+            f"weighting needs at least {cards.min_samples}): {rates}"
+        )
+    if cards.regimes:
+        lines += [
+            "",
+            "| Regime | Forecasts | Direction | P10–P90 coverage | Brier | Mean signed error |",
+            "|---|---|---|---|---|---|",
+        ]
+        for g in cards.regimes:
+            current = " (current)" if g.group == regime else ""
+            rate = "" if g.direction.rate is None else f" ({_prob(g.direction.rate)})"
+            lines.append(
+                f"| {g.group}{current} | {g.n} | {g.direction.hits}/{g.direction.n}{rate} "
+                f"| {_prob(g.coverage_80pct)} | {g.brier:.4f} | {_ret(g.mean_signed_error_pct)} |"
+            )
     return lines
 
 
@@ -160,6 +354,7 @@ def _render(snapshot: ForecastSnapshot) -> str:
     gate = next(
         (d for d in snapshot.decisions if d.decision_type.value == "forecast_adjustment_gate"), None
     )
+    memory = _learning_memory(snapshot)
 
     lines = [
         f"# Forecast report: {snapshot.ticker} ({snapshot.company_name})",
@@ -171,8 +366,22 @@ def _render(snapshot: ForecastSnapshot) -> str:
         f"({snapshot.horizon_trading_days} trading days)",
         f"- Last close: {_price(snapshot.last_close)}",
         "",
+    ]
+    if memory is not None:
+        lines += [
+            "## Last forecast vs actual",
+            "",
+            *_last_review_lines(memory),
+            "",
+            "## System adaptation",
+            "",
+            *_adaptation_lines(memory, snapshot),
+            "",
+        ]
+    lines += [
         "## Prior context",
         "",
+        *_review_run_lines(snapshot.data_inputs.get("review")),
         *_prior_context_lines(snapshot.data_inputs.get("memory")),
         "",
         "## Current analysis",
@@ -273,6 +482,15 @@ def _render(snapshot: ForecastSnapshot) -> str:
         f"{_price(final.p90_price)} would fall outside the forecast's P10–P90 range.",
         "- Any risk listed above materialising before the target date.",
         "",
+    ]
+    if memory is not None:
+        lines += [
+            "## Track record",
+            "",
+            *_track_record_lines(memory, snapshot.market_regime.value),
+            "",
+        ]
+    lines += [
         "## Data quality",
         "",
     ]
@@ -332,8 +550,8 @@ def find_unsupported_numbers(report: str, snapshot: ForecastSnapshot) -> list[st
     Snapshot strings (evidence, rationales, IDs, dates, model names) are removed
     first, since any digits inside them are quoted rather than introduced. Every
     remaining number must match one of the writer's formats applied to a
-    snapshot number: an integer as-is, a value at 2 decimals, or a value x100
-    at 1 decimal (a probability shown as a percentage). This proves each number
+    snapshot number: an integer as-is, a value at 2 or 4 decimals (a loss), or a
+    value x100 at 1 decimal (a probability shown as a percentage). This proves each number
     comes from the snapshot, not that it is shown next to the right label.
     """
     numbers: list[float] = []
@@ -355,6 +573,7 @@ def find_unsupported_numbers(report: str, snapshot: ForecastSnapshot) -> list[st
         remainder = remainder.replace(s, " ")
 
     allowed = {f"{abs(v):.2f}" for v in numbers} | {f"{abs(v) * 100:.1f}" for v in numbers}
+    allowed |= {f"{abs(v):.4f}" for v in numbers}
     allowed |= {str(int(abs(v))) for v in numbers if v.is_integer()}
     return [tok for tok in _NUMBER_RE.findall(remainder) if tok not in allowed]
 

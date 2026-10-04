@@ -28,11 +28,11 @@ POSTMORTEM_PROMPT_FILE = "postmortem.txt"
 
 # The predictor prompt is assembled in code (workflow.build_predictor_prompt);
 # bump this whenever that function's wording or constraints change.
-PREDICTOR_PROMPT_VERSION = "4"
+PREDICTOR_PROMPT_VERSION = "5"
 # Bump when the deterministic critic's checks or tolerances change.
 CRITIC_VERSION = "1"
 # Bump when the report layout changes.
-REPORT_WRITER_VERSION = "4"
+REPORT_WRITER_VERSION = "5"
 # Bump when ForecastInsight distillation (schemas/memory.py) changes.
 MEMORY_WRITER_VERSION = "1"
 # Bump when the calibration estimator, shrinkage or eligibility rules change

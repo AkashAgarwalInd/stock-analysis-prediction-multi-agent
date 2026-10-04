@@ -242,6 +242,19 @@ class MemoryStore:
             and lesson.status != LessonStatus.RETIRED
         ]
 
+    def lessons_for_forecast(self, forecast_id: str, *, as_of: datetime) -> list[Lesson]:
+        """Lessons that ``forecast_id`` created or confirmed by ``as_of``, with their status then."""
+        rows = self.db.fetchall(
+            "SELECT DISTINCT lesson_id FROM lesson_evidence WHERE forecast_id = ? AND kind = ? "
+            "AND julianday(recorded_at) <= julianday(?) ORDER BY lesson_id",
+            (forecast_id, LessonEvidenceKind.CONFIRMED.value, _utc_iso(as_of)),
+        )
+        return [
+            lesson
+            for r in rows
+            if (lesson := self.get_lesson(r["lesson_id"], as_of=as_of)) is not None
+        ]
+
     def evidence_windows(self, lesson_id: str) -> list[dict[str, str]]:
         """Forecast windows behind a lesson's confirmations and contradictions."""
         rows = self.db.fetchall(
@@ -276,7 +289,7 @@ class MemoryStore:
     def track_record(self, ticker: str, *, before: datetime, as_of_date: date) -> TrackRecord:
         """Counts of original forecasts made, scored and awaiting evaluation before ``before``.
 
-        Only outcomes evaluated before the cutoff count, so the record is point-in-time.
+        Only outcomes evaluated by the cutoff count, so the record is point-in-time.
         """
         cutoff = _utc_iso(before)
         row = self.db.fetchone(
@@ -284,7 +297,7 @@ class MemoryStore:
             "COALESCE(SUM(o.status = 'scored'), 0) AS scored, "
             "COALESCE(SUM(s.target_date < ? AND o.forecast_id IS NULL), 0) AS awaiting "
             "FROM forecast_snapshots s LEFT JOIN forecast_outcomes o "
-            "ON o.forecast_id = s.forecast_id AND julianday(o.evaluated_at) < julianday(?) "
+            "ON o.forecast_id = s.forecast_id AND julianday(o.evaluated_at) <= julianday(?) "
             "WHERE s.ticker = ? AND s.version = 1 AND julianday(s.made_at) < julianday(?)",
             (as_of_date.isoformat(), cutoff, ticker, cutoff),
         )

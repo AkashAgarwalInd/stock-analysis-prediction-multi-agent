@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from stock_analysis.schemas.scorecard import GroupScore, HitRate
 from stock_analysis.schemas.snapshot import ForecastSnapshot
 
 # Plan.md §20: discrete event lessons (e.g. earnings) activate after fewer confirmations.
@@ -140,11 +141,54 @@ def lesson_status(
     return LessonStatus.ACTIVE if evidence_count >= needed else LessonStatus.CANDIDATE
 
 
+class WindowMetrics(BaseModel):
+    """The final forecast's record over one rolling track-record window (Plan.md §28)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str
+    n: int = Field(ge=0)
+    direction: HitRate
+    coverage_80pct: Optional[float] = None
+    brier: Optional[float] = None
+    mean_abs_error_pct: Optional[float] = None
+    mean_signed_error_pct: Optional[float] = None
+    n_adjusted: int = Field(default=0, ge=0, description="Forecasts the LLM adjusted")
+    llm_value_added: Optional[float] = Field(
+        default=None, description="Mean calibrated-quant Brier - final Brier"
+    )
+    finding: str
+
+
+class OutcomeMetrics(BaseModel):
+    """Rolling accuracy of the independent scored forecasts, copied from the track record."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    n_forecasts: int = Field(ge=0, description="Independent scored forecasts")
+    min_samples: int = Field(ge=1, description="Below this no variant is called better")
+    windows: list[WindowMetrics] = Field(default_factory=list)
+
+    def distinct_windows(self) -> list[tuple[str, WindowMetrics]]:
+        """Non-empty windows, merging a longer window into a shorter one with the same
+        forecasts (windows are nested, so an equal count means the same forecasts)."""
+        merged: list[tuple[list[str], WindowMetrics]] = []
+        for w in self.windows:
+            if not w.n:
+                continue
+            if merged and merged[-1][1].n == w.n:
+                merged[-1][0].append(w.label)
+            else:
+                merged.append(([w.label], w))
+        return [(" = ".join(labels), w) for labels, w in merged]
+
+
 class TrackRecord(BaseModel):
     """What is known about this ticker's past forecasts.
 
-    Counts only; nothing here is estimated. ``outcome_metrics`` is reserved for
-    rolling accuracy metrics (Plan.md §28) and stays ``None`` until they exist.
+    Counts come from the stored records; ``outcome_metrics`` (Plan.md §28) is
+    copied from the point-in-time track record and is ``None`` when it was not
+    loaded (no outcome store) or nothing has been scored yet.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -155,11 +199,129 @@ class TrackRecord(BaseModel):
     forecasts_awaiting_outcome: int = Field(
         ge=0, description="Target date passed, not yet evaluated"
     )
-    outcome_metrics: Optional[dict[str, Any]] = None
+    outcome_metrics: Optional[OutcomeMetrics] = None
+
+
+class LessonNote(BaseModel):
+    """A lesson tied to a reviewed forecast, with its status at load time."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lesson_id: str
+    text: str
+    scope: Literal["ticker", "sector", "general"]
+    status: LessonStatus
+    evidence_count: int = Field(ge=0)
+
+
+class LastReview(BaseModel):
+    """Plan.md §5.2 ``last_review``: the latest evaluated forecast of the ticker vs actual.
+
+    Every number is copied from the stored snapshot and outcome; the cause comes
+    from the stored postmortem (``None`` when none existed yet).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    forecast_id: str
+    as_of_date: date
+    target_date: date
+    evaluated_at: AwareDatetime
+    status: Literal["scored", "invalid"]
+    invalid_reason: Optional[str] = None
+    last_close: float
+    prob_up: float
+    prob_flat: float
+    prob_down: float
+    p10_price: float
+    p50_price: float
+    p90_price: float
+    adjustment_applied: bool
+    calibration_version: int = Field(ge=0)
+    predicted_direction: Optional[str] = None
+    realized_direction: Optional[str] = None
+    direction_correct: Optional[bool] = None
+    actual_close: Optional[float] = Field(default=None, description="On the forecast's price basis")
+    actual_return_pct: Optional[float] = None
+    signed_error_pct: Optional[float] = Field(default=None, description="Actual vs the final P50")
+    in_80pct_band: Optional[bool] = None
+    vol_ratio: Optional[float] = None
+    nifty_return_pct: Optional[float] = None
+    excess_vs_nifty_pct: Optional[float] = None
+    baseline_loss: Optional[float] = None
+    final_loss: Optional[float] = None
+    llm_value_added: Optional[float] = None
+    calibration_value_added: Optional[float] = None
+    primary_cause: Optional[str] = None
+    cause_explanation: Optional[str] = None
+    expected_noise: Optional[bool] = None
+    lessons: list[LessonNote] = Field(default_factory=list)
+
+
+class Adaptation(BaseModel):
+    """Plan.md §30 system adaptation: the calibration the quant baseline will use.
+
+    ``version`` 0 means no calibration has been stored yet; the ``previous_*``
+    values are what that version replaced.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: int = Field(ge=0)
+    vol_multiplier: float = 1.0
+    p50_bias_shift_pct: float = 0.0
+    previous_vol_multiplier: float = 1.0
+    previous_p50_bias_shift_pct: float = 0.0
+    created_at: Optional[AwareDatetime] = None
+    n_samples: int = Field(default=0, ge=0, description="Forecasts the version was estimated on")
+    reason: list[str] = Field(default_factory=list)
+    min_samples: int = Field(ge=1, description="CALIBRATION_MIN_SAMPLES")
+    applied: bool = Field(description="False when LEARNING_ENABLED is off")
+    changed_since_last_forecast: Optional[bool] = Field(
+        default=None,
+        description="Stored after the previous forecast was made (None: no previous forecast)",
+    )
+
+
+class ScorecardSummary(BaseModel):
+    """Plan.md §24-25 for the ticker: analyst hit rates and forecast quality per regime."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    n_forecasts: int = Field(ge=0)
+    min_samples: int = Field(ge=1, description="MIN_SAMPLES_ANALYST_WEIGHTS")
+    analysts: dict[str, HitRate] = Field(default_factory=dict)
+    regimes: list[GroupScore] = Field(default_factory=list)
+
+
+class PreRunReview(BaseModel):
+    """What the review run before this forecast did (Plan.md §5.2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_at: AwareDatetime
+    matured: int = Field(default=0, ge=0)
+    scored: int = Field(default=0, ge=0)
+    invalid: int = Field(default=0, ge=0)
+    unresolved: int = Field(default=0, ge=0)
+    postmortems: int = Field(default=0, ge=0)
+    lessons_created: int = Field(default=0, ge=0)
+    lessons_updated: int = Field(default=0, ge=0)
+    calibration_version: Optional[int] = Field(
+        default=None, description="New calibration version stored by this review"
+    )
+    errors: list[str] = Field(default_factory=list)
 
 
 class MemoryContext(BaseModel):
-    """Prior context loaded for a run; stored in the snapshot's data inputs."""
+    """Prior context loaded for a run; stored in the snapshot's data inputs.
+
+    The learning fields (``last_review``, ``adaptation``, ``scorecards`` and
+    the track record's ``outcome_metrics``) need the outcome and learning
+    stores. ``learning_loaded`` names the parts that were loaded: a part that is
+    missing from it was not configured or failed (with a note in ``warnings``),
+    so ``None`` there does not mean "nothing to show".
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -167,8 +329,19 @@ class MemoryContext(BaseModel):
     prior_forecasts: list[ForecastInsight] = Field(default_factory=list)
     active_lessons: list[Lesson] = Field(default_factory=list)
     track_record: Optional[TrackRecord] = None
+    last_review: Optional[LastReview] = None
+    adaptation: Optional[Adaptation] = None
+    scorecards: Optional[ScorecardSummary] = None
+    learning_loaded: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     error: Optional[str] = None
 
     @property
     def has_content(self) -> bool:
-        return bool(self.prior_forecasts or self.active_lessons)
+        return bool(
+            self.prior_forecasts
+            or self.active_lessons
+            or self.last_review
+            or (self.adaptation and self.adaptation.version)
+            or (self.scorecards and self.scorecards.n_forecasts)
+        )

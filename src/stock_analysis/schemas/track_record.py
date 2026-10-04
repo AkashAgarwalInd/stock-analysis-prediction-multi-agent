@@ -2,8 +2,9 @@
 
 Like the scorecards, these are aggregates over immutable snapshot and outcome
 records, computed on demand with a point-in-time cutoff instead of being kept
-in mutable tables. They are for evaluation only: nothing in the forecasting
-pipeline reads them.
+in mutable tables. The forecast graph shows the final forecast's rolling
+metrics to the predictor (Plan.md Phase 16); nothing changes automatically
+because of them.
 """
 
 from __future__ import annotations

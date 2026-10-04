@@ -6,6 +6,7 @@ from stock_analysis.learning.calibration import (
     observation_from,
     update_calibration,
 )
+from stock_analysis.learning.context import add_learning_context
 from stock_analysis.learning.cycle import (
     HindsightNewsSource,
     LearningCycle,
@@ -52,6 +53,7 @@ __all__ = [
     "LearningReport",
     "LessonAction",
     "RssHindsightNewsSource",
+    "add_learning_context",
     "analyst_scorecards",
     "apply_lessons",
     "build_evaluation",

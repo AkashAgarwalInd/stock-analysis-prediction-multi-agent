@@ -93,6 +93,8 @@ class GraphState(BaseModel):
     snapshot_persisted: bool = False
     forecast_report: Optional[str] = None
 
+    # Plan.md Phase 16: review of matured forecasts run before this forecast (PreRunReview)
+    review_summary: Optional[dict] = None
     # Phase 7 memory (Plan.md): prior context loaded at the start, insight written at the end
     memory_context: Optional[dict] = None
     memory_written: bool = False

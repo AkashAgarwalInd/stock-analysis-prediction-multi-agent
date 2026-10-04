@@ -11,6 +11,10 @@ from stock_analysis.database import (
 from stock_analysis.langgraph.runner import run_forecast
 from stock_analysis.schemas.graph_state import GraphState
 from tests.forecast_helpers import DownLLM, FakeLLM
+from tests.outcome_helpers import FakePriceSource
+
+# The runner reviews matured forecasts first; keep that review offline
+NO_PRICES = FakePriceSource({})
 
 
 @pytest.fixture
@@ -24,7 +28,7 @@ def default_database():
 @pytest.mark.usefixtures("price_history", "default_database")
 class TestRunForecast:
     def test_persists_to_configured_database(self, migrated_db, initial_state):
-        state = run_forecast(initial_state, llm_factory=FakeLLM("valid"))
+        state = run_forecast(initial_state, llm_factory=FakeLLM("valid"), price_source=NO_PRICES)
 
         assert state.snapshot_persisted is True
         stored = ForecastSnapshotStore(migrated_db).get(state.forecast_id)
@@ -35,13 +39,13 @@ class TestRunForecast:
         assert get_database().path == migrated_db.path
 
     def test_persists_degraded_quant_only_forecast(self, migrated_db, initial_state):
-        state = run_forecast(initial_state, llm_factory=DownLLM())
+        state = run_forecast(initial_state, llm_factory=DownLLM(), price_source=NO_PRICES)
         assert state.snapshot_persisted is True
         assert ForecastSnapshotStore(migrated_db).get(state.forecast_id) is not None
 
     def test_fills_company_name_from_symbol_index(self, migrated_db):
         state = GraphState(symbol="RELIANCE", resolved_symbol="RELIANCE.NS")
-        result = run_forecast(state, llm_factory=FakeLLM("valid"))
+        result = run_forecast(state, llm_factory=FakeLLM("valid"), price_source=NO_PRICES)
 
         stored = ForecastSnapshotStore(migrated_db).get(result.forecast_id)
         assert stored.company_name == "Reliance Industries Ltd"
@@ -49,4 +53,4 @@ class TestRunForecast:
     def test_unmigrated_database_fails_fast(self, temp_db_path, monkeypatch, initial_state):
         monkeypatch.setenv("DATABASE_PATH", str(temp_db_path))
         with pytest.raises(ForecastSnapshotError, match="stock-analysis migrate"):
-            run_forecast(initial_state, llm_factory=FakeLLM("valid"))
+            run_forecast(initial_state, llm_factory=FakeLLM("valid"), price_source=NO_PRICES)

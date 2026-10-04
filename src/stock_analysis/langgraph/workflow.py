@@ -15,7 +15,9 @@ from stock_analysis.config.settings import get_settings
 from stock_analysis.database.forecast_store import ForecastSnapshotError, ForecastSnapshotStore
 from stock_analysis.database.learning_store import LearningStore, LearningStoreError
 from stock_analysis.database.memory_store import MemoryStore, MemoryStoreError
+from stock_analysis.database.outcome_store import OutcomeStore
 from stock_analysis.guardrails import run_preflight_guardrails
+from stock_analysis.learning.context import add_learning_context
 from stock_analysis.llm.factory import LLMModel, get_llm_factory
 from stock_analysis.logging import get_logger
 from stock_analysis.quant import QuantForecaster
@@ -38,7 +40,14 @@ from stock_analysis.schemas.forecast_pipeline import (
     PredictorResult,
 )
 from stock_analysis.schemas.graph_state import GraphState
-from stock_analysis.schemas.memory import ForecastInsight, MemoryContext
+from stock_analysis.schemas.memory import (
+    ForecastInsight,
+    LastReview,
+    MemoryContext,
+    PreRunReview,
+    ScorecardSummary,
+    TrackRecord,
+)
 from stock_analysis.schemas.snapshot import PriceHistorySnapshot
 from stock_analysis.snapshots import (
     SnapshotNotReadyError,
@@ -408,12 +417,15 @@ def build_predictor_prompt(
     risks: list[str],
     revision_guidance: Optional[str] = None,
     prior_context: Optional[dict] = None,
+    regime: Optional[str] = None,
 ) -> str:
     """Build the constrained predictor prompt.
 
     Numbers come from the quant baseline; the LLM may only propose bounded,
     evidence-backed adjustments to them. ``prior_context`` (from the memory
-    loader) adds earlier forecasts, active lessons and the track record.
+    loader) adds earlier forecasts, the last forecast review, the calibration,
+    active lessons, scorecards, the track record and the performance in each
+    regime (``regime`` is this run's, so its row can be marked).
     """
     max_shift = _max_prob_shift()
     lines = [
@@ -455,14 +467,18 @@ def build_predictor_prompt(
         lines.extend(f"  - {r}" for r in risks)
         lines.append("")
 
-    lines += format_prior_context(prior_context)
+    lines += format_prior_context(prior_context, regime=regime)
 
     lines += [
         "CONSTRAINTS:",
-        f"- MAX_PROB_SHIFT = {max_shift} (per-probability change vs the baseline)",
+        "- Start from the baseline.",
+        "- Explain every adjustment: each needs a reason and evidence_refs.",
+        f"- Stay within the adjustment limits: MAX_PROB_SHIFT = {max_shift} "
+        "(per-probability change vs the baseline)",
+        "- Prefer wider bands when uncertainty increases; never narrow them dramatically.",
+        "- Do not create unsupported facts.",
         "- prob_up + prob_flat + prob_down MUST equal 1.0",
         "- P10 < P50 < P90",
-        "- Every adjustment needs a reason and evidence_refs",
         "- If no adjustment is justified, return the baseline with adjustment_applied=false",
         "",
         "Return JSON matching the PredictorResult schema.",
@@ -474,8 +490,135 @@ def build_predictor_prompt(
     return "\n".join(lines)
 
 
-def format_prior_context(prior_context: Optional[dict]) -> list[str]:
-    """Prompt lines for memory context; empty when there is nothing to show."""
+def _signed(value: Optional[float], suffix: str = "%") -> str:
+    return "n/a" if value is None else f"{value:+.2f}{suffix}"
+
+
+def _hits(hits: int, n: int, rate: Optional[float]) -> str:
+    return f"{hits}/{n}" + ("" if rate is None else f" ({rate:.0%})")
+
+
+def _review_lines(review: LastReview) -> list[str]:
+    head = f"  LAST REVIEW of the forecast as of {review.as_of_date} for {review.target_date}:"
+    if review.status != "scored":
+        return [f"{head} could not be evaluated ({review.invalid_reason})."]
+    band = "inside" if review.in_80pct_band else "OUTSIDE"
+    verdict = "correct" if review.direction_correct else "wrong"
+    lines = [
+        head,
+        f"    Predicted {str(review.predicted_direction).upper()} (P(up) {review.prob_up:.3f}), "
+        f"P10/P50/P90 {review.p10_price:.2f}/{review.p50_price:.2f}/{review.p90_price:.2f}; "
+        f"actual close {review.actual_close:.2f} (return {_signed(review.actual_return_pct)}), "
+        f"error vs P50 {_signed(review.signed_error_pct)}, {band} the P10-P90 band, "
+        f"direction {verdict}.",
+        f"    Nifty 50 {_signed(review.nifty_return_pct)}, stock vs Nifty "
+        f"{_signed(review.excess_vs_nifty_pct)}"
+        + (
+            ""
+            if review.vol_ratio is None
+            else f"; realized/predicted volatility {review.vol_ratio:.2f}x"
+        )
+        + ".",
+    ]
+    if review.adjustment_applied and review.llm_value_added is not None:
+        lines.append(
+            f"    LLM value added {review.llm_value_added:+.4f} (quant-baseline Brier minus "
+            "final Brier; positive means the adjustment helped; one observation only)."
+        )
+    else:
+        lines.append("    The LLM did not adjust that forecast.")
+    if review.primary_cause:
+        lines.append(f"    Postmortem cause: {review.primary_cause}: {review.cause_explanation}")
+    else:
+        lines.append("    Postmortem: not available yet.")
+    lines += [
+        f"    Lesson from it ({lesson.status.value}, {lesson.evidence_count} confirmations): "
+        f"{lesson.text}"
+        for lesson in review.lessons
+    ]
+    return lines
+
+
+def _adaptation_lines(ctx: MemoryContext) -> list[str]:
+    adaptation = ctx.adaptation
+    if adaptation is None:
+        return []
+    if not adaptation.version:
+        return [
+            "  CALIBRATION: none yet; the quant baseline is uncalibrated until at least "
+            f"{adaptation.min_samples} independent forecasts are scored."
+        ]
+    lines = [
+        f"  CALIBRATION v{adaptation.version} (estimated on {adaptation.n_samples} scored "
+        f"forecasts): volatility multiplier {adaptation.previous_vol_multiplier:.2f} -> "
+        f"{adaptation.vol_multiplier:.2f}, P50 shift "
+        f"{_signed(adaptation.previous_p50_bias_shift_pct)} -> "
+        f"{_signed(adaptation.p50_bias_shift_pct)}"
+        + (
+            "; already applied to the quant baseline above, do not apply it again."
+            if adaptation.applied
+            else "; NOT applied (learning disabled)."
+        )
+    ]
+    lines += [f"    Reason: {r}" for r in adaptation.reason]
+    return lines
+
+
+def _track_record_lines(track: TrackRecord) -> list[str]:
+    lines = [
+        f"  Track record: earlier forecasts {track.forecasts_made}; "
+        f"scored against actual prices {track.forecasts_scored}; "
+        f"awaiting evaluation {track.forecasts_awaiting_outcome}."
+    ]
+    metrics = track.outcome_metrics
+    if metrics is None:
+        return lines
+    for label, w in metrics.distinct_windows():
+        coverage = "n/a" if w.coverage_80pct is None else f"{w.coverage_80pct:.0%}"
+        brier = "n/a" if w.brier is None else f"{w.brier:.3f}"
+        mae = "n/a" if w.mean_abs_error_pct is None else f"{w.mean_abs_error_pct:.2f}%"
+        llm = (
+            f"LLM value added {w.llm_value_added:+.4f} over {w.n_adjusted} adjusted"
+            if w.llm_value_added is not None
+            else "no forecast adjusted by the LLM"
+        )
+        lines.append(
+            f"    {label}: {w.n} forecasts; direction "
+            f"{_hits(w.direction.hits, w.direction.n, w.direction.rate)}; P10-P90 coverage "
+            f"{coverage} (target 80%); Brier {brier}; mean abs error {mae}; mean signed error "
+            f"{_signed(w.mean_signed_error_pct)}; {llm}."
+        )
+    lines.append(
+        f"    Fewer than {metrics.min_samples} scored forecasts is anecdotal, not a finding."
+    )
+    return lines
+
+
+def _scorecard_lines(cards: ScorecardSummary, regime: Optional[str]) -> list[str]:
+    if not cards.n_forecasts:
+        return []
+    lines = [
+        f"  SCORECARDS ({cards.n_forecasts} independent scored forecasts; fewer than "
+        f"{cards.min_samples} is anecdotal):"
+    ]
+    if cards.analysts:
+        lines.append(
+            "    Analyst directional hit rates: "
+            + "; ".join(f"{name} {_hits(h.hits, h.n, h.rate)}" for name, h in cards.analysts.items())
+        )
+    for g in cards.regimes:
+        current = " (this run's regime)" if g.group == regime else ""
+        lines.append(
+            f"    Regime {g.group}{current}: {g.n} forecasts, direction "
+            f"{_hits(g.direction.hits, g.direction.n, g.direction.rate)}, P10-P90 coverage "
+            f"{g.coverage_80pct:.0%}, Brier {g.brier:.3f}, mean signed error "
+            f"{_signed(g.mean_signed_error_pct)}"
+        )
+    return lines
+
+
+def format_prior_context(prior_context: Optional[dict], regime: Optional[str] = None) -> list[str]:
+    """Prompt lines for memory and learning context; empty when there is nothing to show."""
     if not prior_context:
         return []
     ctx = MemoryContext.model_validate(prior_context)
@@ -493,6 +636,9 @@ def format_prior_context(prior_context: Optional[dict]) -> list[str]:
             f"P10/P50/P90 {f.p10_price:.2f}/{f.p50_price:.2f}/{f.p90_price:.2f}, "
             f"adjustment applied: {'yes' if f.adjustment_applied else 'no'}"
         )
+    if ctx.last_review is not None:
+        lines += _review_lines(ctx.last_review)
+    lines += _adaptation_lines(ctx)
     if ctx.active_lessons:
         lines.append("  Active lessons (cite as evidence_refs 'lesson:<id>' only if relevant):")
         lines.extend(
@@ -501,15 +647,19 @@ def format_prior_context(prior_context: Optional[dict]) -> list[str]:
             for lesson in ctx.active_lessons
         )
     if track:
-        lines.append(
-            f"  Track record: earlier forecasts {track.forecasts_made}; "
-            f"scored against actual prices {track.forecasts_scored}; "
-            f"awaiting evaluation {track.forecasts_awaiting_outcome}."
-        )
+        lines += _track_record_lines(track)
+    if ctx.scorecards is not None:
+        lines += _scorecard_lines(ctx.scorecards, regime)
     lines += [
         "  Do not treat a previous forecast as evidence; it only shows what was predicted before.",
-        "",
     ]
+    if ctx.last_review or (ctx.scorecards and ctx.scorecards.n_forecasts):
+        lines.append(
+            "  Use the review, track record and scorecards only to judge how much uncertainty "
+            "to allow: if past forecasts missed their P10-P90 band or volatility was "
+            "underestimated, prefer a wider band. They say nothing about this week's direction."
+        )
+    lines.append("")
     return lines
 
 
@@ -561,6 +711,7 @@ def make_predictor_node(llm_factory=None) -> Callable[[GraphState], dict]:
             risks=_dedupe([x for r in reports for x in r.get("risks", [])]),
             revision_guidance=guidance,
             prior_context=state.memory_context,
+            regime=state.decision.result if state.decision else None,
         )
 
         try:
@@ -832,18 +983,56 @@ def make_snapshot_node(
 
 
 # ---------------------------------------------------------------------------
+# Review of matured forecasts (Plan.md §5.2, Phase 16)
+# ---------------------------------------------------------------------------
+
+# (run_at, ticker) -> what the review did; langgraph.review_graph.make_pre_run_reviewer
+Reviewer = Callable[[datetime, str], PreRunReview]
+
+
+def make_review_node(reviewer: Optional[Reviewer] = None) -> Callable[[GraphState], dict]:
+    """Review the ticker's matured forecasts before the new analysis.
+
+    Scoring, postmortems, lessons and calibration are stored by the review, so
+    the memory loader that runs next sees them. Without a ``reviewer`` nothing
+    runs (a backtest reviews each week itself). A failing review is recorded
+    in ``review_summary`` and never blocks the forecast.
+    """
+
+    def review_node(state: GraphState) -> dict:
+        if reviewer is None:
+            return {}
+        now = _now(state)
+        try:
+            summary = reviewer(now, state.symbol)
+        except Exception as err:  # the forecast must run even if the review cannot
+            logger.warning("pre_run_review_failed", symbol=state.symbol, error=str(err))
+            summary = PreRunReview(run_at=now, errors=[f"review failed: {err}"[:300]])
+        return {"review_summary": summary.model_dump(mode="json")}
+
+    return review_node
+
+
+# ---------------------------------------------------------------------------
 # Memory nodes (Plan.md Phase 7)
 # ---------------------------------------------------------------------------
 
 
 def make_memory_loader_node(
     memory_store: Optional[MemoryStore] = None,
+    snapshot_store: Optional[ForecastSnapshotStore] = None,
+    outcome_store: Optional[OutcomeStore] = None,
+    learning_store: Optional[LearningStore] = None,
 ) -> Callable[[GraphState], dict]:
     """Load prior insights, active lessons and the track record for the ticker.
 
-    Without a store memory is not configured and ``memory_context`` stays None.
-    A failing store never blocks the forecast: the run continues with an
-    empty context that records the error.
+    With the snapshot, outcome and learning stores it also loads what was
+    learned (Plan.md Phase 16): the last forecast review, the calibration in
+    force, the scorecards and the rolling track-record metrics, all as of the
+    run's clock. Without a memory store memory is not configured and
+    ``memory_context`` stays None. A failing store never blocks the forecast:
+    the run continues with an empty context that records the error (or, for a
+    learning part, without that part and a warning).
     """
 
     def memory_loader_node(state: GraphState) -> dict:
@@ -871,6 +1060,16 @@ def make_memory_loader_node(
         except (MemoryStoreError, sqlite3.Error, ValidationError) as err:
             logger.warning("memory_load_failed", symbol=state.symbol, error=str(err))
             context = MemoryContext(loaded=False, error=str(err)[:500])
+            return {"memory_context": context.model_dump(mode="json")}
+        context = add_learning_context(
+            context,
+            state.symbol,
+            as_of=now,
+            snapshot_store=snapshot_store,
+            outcome_store=outcome_store,
+            learning_store=learning_store,
+            memory_store=memory_store,
+        )
         return {"memory_context": context.model_dump(mode="json")}
 
     return memory_loader_node
@@ -918,11 +1117,17 @@ def build_workflow(
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
     price_fetcher: Optional[PriceFetcher] = None,
+    *,
+    outcome_store: Optional[OutcomeStore] = None,
+    reviewer: Optional[Reviewer] = None,
 ) -> StateGraph:
     """Build the LangGraph workflow.
 
     Topology:
-        memory_loader (prior context when ``memory_store`` is given)
+        review_matured (runs ``reviewer`` for the ticker when given)
+          → memory_loader (prior context when ``memory_store`` is given; plus the last
+                           review, calibration, scorecards and track record when the
+                           snapshot, outcome and learning stores are given too)
           → mark_collectors
           → parallel analysts (technical, fundamental, sentiment, context)
           → guardrails
@@ -940,8 +1145,13 @@ def build_workflow(
 
     workflow = StateGraph(GraphState)
 
-    workflow.add_node("memory_loader", make_memory_loader_node(memory_store))
-    workflow.set_entry_point("memory_loader")
+    workflow.add_node("review_matured", make_review_node(reviewer))
+    workflow.set_entry_point("review_matured")
+    workflow.add_node(
+        "memory_loader",
+        make_memory_loader_node(memory_store, snapshot_store, outcome_store, learning_store),
+    )
+    workflow.add_edge("review_matured", "memory_loader")
 
     # Collectors are pre-loaded into state; this node only marks them complete
     workflow.add_node("mark_collectors", lambda state: {"collectors_complete": True})
@@ -1006,14 +1216,24 @@ def compile_graph(
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
     price_fetcher: Optional[PriceFetcher] = None,
+    *,
+    outcome_store: Optional[OutcomeStore] = None,
+    reviewer: Optional[Reviewer] = None,
 ):
     """Compile the LangGraph workflow.
 
-    Snapshots, memory and calibration are used only when their stores are
-    given; production callers should use ``langgraph.runner.run_forecast``,
-    which always wires all three. ``price_fetcher`` replaces the live price
+    Snapshots, memory, outcomes and calibration are used only when their
+    stores are given, and matured forecasts are reviewed first only with a
+    ``reviewer``; production callers should use ``langgraph.runner.run_forecast``,
+    which wires all of them. ``price_fetcher`` replaces the live price
     collector (a backtest passes a point-in-time one).
     """
     return build_workflow(
-        llm_factory, snapshot_store, memory_store, learning_store, price_fetcher
+        llm_factory,
+        snapshot_store,
+        memory_store,
+        learning_store,
+        price_fetcher,
+        outcome_store=outcome_store,
+        reviewer=reviewer,
     ).compile()

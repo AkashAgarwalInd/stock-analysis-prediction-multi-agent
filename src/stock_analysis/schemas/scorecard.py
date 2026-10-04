@@ -2,7 +2,8 @@
 
 Scorecards are aggregates over immutable outcome records, computed on demand
 with a point-in-time cutoff, never stored as mutable counters. They are for
-evaluation only: nothing in the forecasting pipeline reads them.
+evaluation and context only: the forecast graph shows a summary to the
+predictor (Plan.md Phase 16), but nothing is reweighted automatically.
 """
 
 from __future__ import annotations

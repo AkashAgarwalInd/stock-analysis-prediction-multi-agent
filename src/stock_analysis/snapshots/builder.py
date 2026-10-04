@@ -74,6 +74,9 @@ def collect_data_inputs(state: GraphState) -> dict[str, Any]:
     if state.disabled_analysts:
         # Only recorded when used, so live snapshots keep their existing input hash
         inputs["disabled_analysts"] = _plain(state.disabled_analysts)
+    if state.review_summary is not None:
+        # The review run just before this forecast (Plan.md §5.2); only when one ran
+        inputs["review"] = _plain(state.review_summary)
     return inputs
 
 

@@ -138,9 +138,12 @@ class TestSecondRunShowsReview:
         last = MemoryContext.model_validate(second.memory_context).last_review
         assert "## Last forecast vs actual" in report
         assert f"- Forecast `{first.forecast_id}`" in report
-        assert f"| P50 / close | ₹{last.p50_price:.2f} | ₹{last.actual_close:.2f} |" in report
-        assert "| OUTSIDE |" in report
-        assert f"- Error vs P50: {last.signed_error_pct:+.2f}%" in report
+        assert (
+            f"| P50 / close | ₹{last.baseline_p50_price:.2f} | ₹{last.p50_price:.2f} "
+            f"| ₹{last.actual_close:.2f} |"
+        ) in report
+        assert f"₹{last.p90_price:.2f} (OUTSIDE)" in report
+        assert f"| {last.signed_error_pct:+.2f}% |" in report
         assert f"- Primary cause: **{last.primary_cause}**" in report
         assert "## System adaptation" in report
         assert "No calibration yet" in report and "(1 so far)" in report

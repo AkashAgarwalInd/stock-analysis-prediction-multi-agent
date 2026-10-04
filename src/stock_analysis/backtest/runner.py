@@ -54,8 +54,10 @@ from stock_analysis.database.migrations import upgrade_database
 from stock_analysis.langgraph.review_graph import compile_review_graph, invoke_review
 from stock_analysis.langgraph.workflow import compile_graph
 from stock_analysis.learning import build_evaluation, build_scorecards, compare_benchmarks
+from stock_analysis.llm.factory import DisabledLLM
 from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar, get_trading_calendar
+from stock_analysis.market.resolver import resolve_nse_ticker
 from stock_analysis.review import last_completed_trading_date
 from stock_analysis.review.prices import NIFTY_50_SYMBOL
 from stock_analysis.schemas.graph_state import GraphState
@@ -191,25 +193,6 @@ def backtest_schedule(
     return windows[::-1]
 
 
-def _resolve(ticker: str) -> tuple[str, str, str]:
-    """(ticker without suffix, yfinance symbol, company name)."""
-    from stock_analysis.market.resolver import SymbolResolver
-
-    resolved = SymbolResolver(enable_yfinance_validation=False).resolve(ticker)
-    symbol = resolved.symbol if resolved else ticker.upper()
-    if "." not in symbol:
-        symbol = f"{symbol}.NS"
-    base = symbol.split(".")[0]
-    return base, symbol, (resolved.name if resolved and resolved.name else base)
-
-
-class _LLMDisabled:
-    """Stands in for the LLM in a quant-only backtest; any call is a bug."""
-
-    def generate_structured(self, *args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("LLM calls are disabled for this backtest")
-
-
 def default_database_path(ticker: str, now: datetime) -> Path:
     return Path("data/backtests") / f"{ticker}-{now:%Y%m%d-%H%M%S}.db"
 
@@ -243,7 +226,7 @@ def run_backtest(
     schedule = backtest_schedule(
         weeks, end or latest, horizon=settings.forecast_horizon_days, calendar=calendar
     )
-    base, symbol, company = _resolve(ticker)
+    base, symbol, company = resolve_nse_ticker(ticker)
 
     upgrade_database(database_path)
     db = Database(database_path)
@@ -308,7 +291,7 @@ def _run(
         if use_llm
         else dict.fromkeys(ALL_ANALYSTS, "quant-only backtest (LLM disabled)")
     )
-    graph_llm = llm_factory if use_llm else _LLMDisabled()
+    graph_llm = llm_factory if use_llm else DisabledLLM()
     postmortem_llm = llm_factory if use_llm else None
     if use_llm and graph_llm is None:
         from stock_analysis.llm.factory import get_llm_factory

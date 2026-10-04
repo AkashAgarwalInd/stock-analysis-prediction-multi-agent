@@ -10,13 +10,12 @@ silently giving them future information (Plan.md §33-34).
 from __future__ import annotations
 
 import math
-from dataclasses import asdict
 from typing import Any, Optional
 
 import numpy as np
 
 from stock_analysis.backtest.data import INDIA_VIX_SYMBOL, QUANT_HISTORY_DAYS, PointInTimeView
-from stock_analysis.indicators.technical import compute_all_indicators
+from stock_analysis.indicators.technical import latest_indicator_summary
 from stock_analysis.review.prices import NIFTY_50_SYMBOL
 
 DISABLED_IN_BACKTEST = {
@@ -38,13 +37,7 @@ def _round(value: Any) -> Any:
 
 def technical_summary(view: PointInTimeView, symbol: str) -> Optional[dict[str, Any]]:
     """The latest indicator values as of the view's date (None if too little history)."""
-    rows = compute_all_indicators(view.frame(symbol, days=QUANT_HISTORY_DAYS))
-    if not rows:
-        return None
-    latest = asdict(rows[-1])
-    latest.pop("symbol", None)
-    latest["date"] = latest["date"].isoformat()
-    return {k: _round(v) for k, v in latest.items()}
+    return latest_indicator_summary(view.frame(symbol, days=QUANT_HISTORY_DAYS), _DECIMALS)
 
 
 def _pct(new: float, old: float) -> float:

@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
 from datetime import date
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -303,3 +304,23 @@ def compute_all_indicators(
         results.append(indicators)
 
     return results
+
+
+def latest_indicator_summary(
+    df: pd.DataFrame, decimals: int = 4
+) -> Optional[dict[str, Any]]:
+    """The latest row of ``compute_all_indicators(df)`` as a compact, JSON-ready dict.
+
+    Floats are rounded to ``decimals`` and NaN becomes None; returns None when
+    there is too little history for the indicators.
+    """
+    rows = compute_all_indicators(df)
+    if not rows:
+        return None
+    latest = asdict(rows[-1])
+    latest.pop("symbol", None)
+    latest["date"] = latest["date"].isoformat()
+    return {
+        k: (None if math.isnan(v) else round(v, decimals)) if isinstance(v, float) else v
+        for k, v in latest.items()
+    }

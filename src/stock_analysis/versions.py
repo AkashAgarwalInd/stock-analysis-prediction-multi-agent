@@ -32,7 +32,7 @@ PREDICTOR_PROMPT_VERSION = "5"
 # Bump when the deterministic critic's checks or tolerances change.
 CRITIC_VERSION = "1"
 # Bump when the report layout changes.
-REPORT_WRITER_VERSION = "5"
+REPORT_WRITER_VERSION = "6"
 # Bump when ForecastInsight distillation (schemas/memory.py) changes.
 MEMORY_WRITER_VERSION = "1"
 # Bump when the calibration estimator, shrinkage or eligibility rules change

@@ -141,8 +141,22 @@ def lesson_status(
     return LessonStatus.ACTIVE if evidence_count >= needed else LessonStatus.CANDIDATE
 
 
+class VariantMetrics(BaseModel):
+    """One benchmark's record over a track-record window (Plan.md §31/§53)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    variant: str = Field(description="naive_flat, quant_uncalibrated, quant_calibrated or final")
+    label: str
+    direction: HitRate
+    coverage_80pct: Optional[float] = Field(default=None, description="None: no band (naive)")
+    brier: Optional[float] = Field(default=None, description="None: no probabilities (naive)")
+    mean_abs_error_pct: Optional[float] = None
+
+
 class WindowMetrics(BaseModel):
-    """The final forecast's record over one rolling track-record window (Plan.md §28)."""
+    """The final forecast's record over one rolling track-record window (Plan.md §28),
+    with every benchmark's record over the same forecasts in ``variants``."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -158,6 +172,7 @@ class WindowMetrics(BaseModel):
         default=None, description="Mean calibrated-quant Brier - final Brier"
     )
     finding: str
+    variants: list[VariantMetrics] = Field(default_factory=list)
 
 
 class OutcomeMetrics(BaseModel):
@@ -238,6 +253,17 @@ class LastReview(BaseModel):
     p90_price: float
     adjustment_applied: bool
     calibration_version: int = Field(ge=0)
+    # The quant baseline the forecast started from (calibrated when a version applied)
+    baseline_prob_up: Optional[float] = None
+    baseline_p10_price: Optional[float] = None
+    baseline_p50_price: Optional[float] = None
+    baseline_p90_price: Optional[float] = None
+    baseline_direction: Optional[str] = None
+    baseline_direction_correct: Optional[bool] = None
+    baseline_signed_error_pct: Optional[float] = Field(
+        default=None, description="Actual vs the quant baseline's P50"
+    )
+    baseline_in_80pct_band: Optional[bool] = None
     predicted_direction: Optional[str] = None
     realized_direction: Optional[str] = None
     direction_correct: Optional[bool] = None

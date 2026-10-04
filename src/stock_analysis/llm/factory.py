@@ -151,3 +151,10 @@ def get_llm_factory() -> LLMFactory:
 def get_llm(role: LLMModel) -> Any:
     """Get an LLM model by role."""
     return get_llm_factory().get_model(role)
+
+
+class DisabledLLM:
+    """Stands in for the LLM in a quant-only run (every analyst disabled); any call is a bug."""
+
+    def generate_structured(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("LLM calls are disabled for this run")

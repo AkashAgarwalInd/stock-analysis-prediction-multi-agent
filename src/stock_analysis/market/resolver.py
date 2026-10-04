@@ -226,3 +226,20 @@ class SymbolResolver:
 
     def is_valid_nse_symbol(self, symbol: str) -> bool:
         return symbol in self.COMMON_STOCKS or symbol.endswith(".NS")
+
+
+def resolve_nse_ticker(query: str) -> tuple[str, str, str]:
+    """(ticker without suffix, yfinance symbol, company name) for a ticker or company name.
+
+    Offline (no yfinance validation): an unknown ticker is passed through with
+    ``.NS`` and fails later when no prices can be fetched for it.
+    """
+    query = query.strip().upper()
+    if query.endswith((".NS", ".BO")):
+        query = query.rsplit(".", 1)[0]  # an NSE system: RELIANCE.NS is RELIANCE
+    resolved = SymbolResolver(enable_yfinance_validation=False).resolve(query)
+    symbol = resolved.symbol if resolved else query
+    if "." not in symbol:
+        symbol = f"{symbol}.NS"
+    base = symbol.split(".")[0]
+    return base, symbol, (resolved.name if resolved and resolved.name else base)

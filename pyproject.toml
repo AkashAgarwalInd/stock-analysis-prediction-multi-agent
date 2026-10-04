@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 stock-analysis = "stock_analysis.cli.main:app"
+stock-agents = "stock_analysis.cli.main:app"
 
 [project.optional-dependencies]
 dev = [

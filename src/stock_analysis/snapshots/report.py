@@ -177,8 +177,27 @@ def _value_added(value: Optional[float], what: str) -> str:
 _NOT_LOADED = "- Not available for this run (not configured, or see the warnings under Prior context)."
 
 
+def _band(low: Optional[float], high: Optional[float], inside: Optional[bool]) -> str:
+    if low is None or high is None:
+        return "n/a"
+    where = "" if inside is None else (" (inside)" if inside else " (OUTSIDE)")
+    return f"{_price(low)}–{_price(high)}{where}"
+
+
+def _call(direction: Optional[str], prob_up: Optional[float], correct: Optional[bool]) -> str:
+    if direction is None:
+        return "n/a"
+    text = direction.upper()
+    if prob_up is not None:
+        text += f" (P(up) {_prob(prob_up)})"
+    if correct is not None:
+        text += " — correct" if correct else " — wrong"
+    return text
+
+
 def _last_review_lines(context: MemoryContext) -> list[str]:
-    """Plan.md §57 "Last forecast vs actual", copied from the stored outcome."""
+    """Plan.md §29/§57 "Last forecast vs actual" with the baseline-vs-final attribution
+    (Plan.md §56 part 4), copied from the stored outcome."""
     if "last_review" not in context.learning_loaded:
         return [_NOT_LOADED]
     review: Optional[LastReview] = context.last_review
@@ -190,26 +209,41 @@ def _last_review_lines(context: MemoryContext) -> list[str]:
     ]
     if review.status != "scored" or review.actual_close is None:
         return [*lines, f"- Not evaluated: {review.invalid_reason}"]
-    band = "inside" if review.in_80pct_band else "OUTSIDE"
-    verdict = "correct" if review.direction_correct else "wrong"
+
+    def error(v: Optional[float]) -> str:
+        return "n/a" if v is None else _ret(v)
+
+    def loss(v: Optional[float]) -> str:
+        return "n/a" if v is None else f"{v:.4f}"
+
+    base_p50 = "n/a" if review.baseline_p50_price is None else _price(review.baseline_p50_price)
+    base_band = _band(
+        review.baseline_p10_price, review.baseline_p90_price, review.baseline_in_80pct_band
+    )
+    base_call = _call(
+        review.baseline_direction, review.baseline_prob_up, review.baseline_direction_correct
+    )
+    final_call = _call(review.predicted_direction, review.prob_up, review.direction_correct)
     lines += [
         "",
-        "| | Forecast | Actual |",
-        "|---|---|---|",
-        f"| P50 / close | {_price(review.p50_price)} | {_price(review.actual_close)} |",
-        f"| P10–P90 range | {_price(review.p10_price)}–{_price(review.p90_price)} | {band} |",
-        f"| Direction | {str(review.predicted_direction).upper()} (P(up) "
-        f"{_prob(review.prob_up)}) | {str(review.realized_direction).upper()} — {verdict} |",
+        "| | Quant baseline | Final forecast | Actual |",
+        "|---|---|---|---|",
+        f"| P50 / close | {base_p50} | {_price(review.p50_price)} "
+        f"| {_price(review.actual_close)} |",
+        f"| P10–P90 range | {base_band} "
+        f"| {_band(review.p10_price, review.p90_price, review.in_80pct_band)} | |",
+        f"| Direction | {base_call} | {final_call} | {str(review.realized_direction).upper()} |",
+        f"| Error vs P50 | {error(review.baseline_signed_error_pct)} "
+        f"| {error(review.signed_error_pct)} | |",
+        f"| Up/flat/down Brier | {loss(review.baseline_loss)} | {loss(review.final_loss)} | |",
         "",
     ]
-    if review.signed_error_pct is not None:
-        lines.append(f"- Error vs P50: {_ret(review.signed_error_pct)}")
     if review.actual_return_pct is not None:
         lines.append(f"- Actual return: {_ret(review.actual_return_pct)}")
     if review.nifty_return_pct is not None:
         excess = review.excess_vs_nifty_pct
         lines.append(
-            f"- Nifty: {_ret(review.nifty_return_pct)}; stock vs Nifty: "
+            f"- Market move: Nifty {_ret(review.nifty_return_pct)}; stock vs Nifty "
             f"{'n/a' if excess is None else _ret(excess)}"
         )
     if review.vol_ratio is not None:
@@ -264,10 +298,14 @@ def _adaptation_lines(context: MemoryContext, snapshot: ForecastSnapshot) -> lis
         lines.append("- Unchanged since the previous forecast of this ticker")
     lines += [f"- Reason: {r}" for r in a.reason]
     if snapshot.calibration is not None:
-        lines.append(
+        shadow, quant = snapshot.shadow_baseline, snapshot.quant_baseline
+        lines += [
             f"- Applied to this forecast (v{snapshot.calibration.version}); the uncalibrated "
-            "baseline is kept as the shadow forecast (see Quant baseline)"
-        )
+            "baseline is kept as the shadow forecast",
+            f"- Effect on this forecast's quant P10–P90 range: before calibration "
+            f"{_price(shadow['p10_price'])}–{_price(shadow['p90_price'])}, after "
+            f"{_price(quant['p10_price'])}–{_price(quant['p90_price'])}",
+        ]
     elif not a.applied:
         lines.append("- Not applied: learning is disabled (LEARNING_ENABLED=false)")
     return lines
@@ -330,6 +368,44 @@ def _track_record_lines(context: MemoryContext, regime: str) -> list[str]:
                 f"| {g.group}{current} | {g.n} | {g.direction.hits}/{g.direction.n}{rate} "
                 f"| {_prob(g.coverage_80pct)} | {g.brier:.4f} | {_ret(g.mean_signed_error_pct)} |"
             )
+    return lines
+
+
+def _benchmark_lines(context: MemoryContext) -> list[str]:
+    """Plan.md §31/§53: naive vs quant vs calibrated quant vs final over the same forecasts."""
+    if "track_record" not in context.learning_loaded:
+        return [_NOT_LOADED]
+    metrics = context.track_record.outcome_metrics if context.track_record else None
+    windows = metrics.distinct_windows() if metrics else []
+    if metrics is None or not windows:
+        return ["- No scored forecasts yet."]
+    label, w = windows[-1]
+    if not w.variants:
+        return [_NOT_LOADED]
+    lines = [
+        f"- **{label}**: every variant scored on the same {w.n} forecasts",
+        "",
+        "| Variant | Direction | P10–P90 coverage | Brier | Mean absolute error |",
+        "|---|---|---|---|---|",
+    ]
+    for v in w.variants:
+        d = v.direction
+        rate = "" if d.rate is None else f" ({_prob(d.rate)})"
+        coverage = "n/a" if v.coverage_80pct is None else _prob(v.coverage_80pct)
+        brier = "n/a" if v.brier is None else f"{v.brier:.4f}"
+        mae = "n/a" if v.mean_abs_error_pct is None else f"{v.mean_abs_error_pct:.2f}%"
+        lines.append(f"| {v.label} | {d.hits}/{d.n}{rate} | {coverage} | {brier} | {mae} |")
+    lines += [
+        "",
+        "- The naive benchmark predicts no change: it has no probabilities or range.",
+        "- Lower Brier and mean absolute error are better; coverage near the band's nominal "
+        "level is better than higher or lower.",
+    ]
+    if w.n < metrics.min_samples:
+        lines.append(
+            f"- With fewer than {metrics.min_samples} scored forecasts these differences "
+            "are not evidence that one variant is better."
+        )
     return lines
 
 
@@ -489,6 +565,10 @@ def _render(snapshot: ForecastSnapshot) -> str:
             "",
             *_track_record_lines(memory, snapshot.market_regime.value),
             "",
+            "## Benchmark comparison",
+            "",
+            *_benchmark_lines(memory),
+            "",
         ]
     lines += [
         "## Data quality",
@@ -506,6 +586,11 @@ def _render(snapshot: ForecastSnapshot) -> str:
         f"- Guardrail warning: {w.get('message')}" for w in quality.get("guardrail_warnings", [])
     ]
     lines += [f"- Warning: {w}" for w in quality.get("warnings", [])]
+    lines += [
+        f"- Input not available ({name}): {inputs['unavailable']}"
+        for name, inputs in snapshot.data_inputs.items()
+        if isinstance(inputs, dict) and inputs.get("unavailable")
+    ]
     if has_advice_wording(snapshot):
         lines.append(f"- Warning: {ADVICE_WORDING_NOTE}")
     lines += [

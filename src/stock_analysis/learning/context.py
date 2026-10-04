@@ -24,6 +24,7 @@ from stock_analysis.database.outcome_store import OutcomeStore, OutcomeStoreErro
 from stock_analysis.learning.evaluation import build_evaluation
 from stock_analysis.learning.scorecards import build_scorecards
 from stock_analysis.logging import get_logger
+from stock_analysis.review.metrics import predicted_direction
 from stock_analysis.schemas.memory import (
     Adaptation,
     LastReview,
@@ -31,11 +32,12 @@ from stock_analysis.schemas.memory import (
     MemoryContext,
     OutcomeMetrics,
     ScorecardSummary,
+    VariantMetrics,
     WindowMetrics,
 )
 from stock_analysis.schemas.outcome import OutcomeStatus
 from stock_analysis.schemas.scorecard import HitRate, Scorecards
-from stock_analysis.schemas.track_record import ForecastTrackRecord
+from stock_analysis.schemas.track_record import VARIANT_LABELS, ForecastTrackRecord
 
 logger = get_logger(__name__)
 
@@ -76,6 +78,10 @@ def load_last_review(
         memory_store.lessons_for_forecast(outcome.forecast_id, as_of=as_of) if memory_store else []
     )
     final = snapshot.final_forecast
+    base = snapshot.quant_baseline
+    base_direction = None
+    if all(isinstance(base.get(k), (int, float)) for k in ("prob_up", "prob_flat", "prob_down")):
+        base_direction = predicted_direction(base["prob_up"], base["prob_flat"], base["prob_down"])
     return LastReview(
         forecast_id=outcome.forecast_id,
         as_of_date=snapshot.as_of_date,
@@ -92,6 +98,18 @@ def load_last_review(
         p90_price=final.p90_price,
         adjustment_applied=final.adjustment_applied,
         calibration_version=snapshot.calibration_version,
+        baseline_prob_up=base.get("prob_up"),
+        baseline_p10_price=base.get("p10_price"),
+        baseline_p50_price=base.get("p50_price"),
+        baseline_p90_price=base.get("p90_price"),
+        baseline_direction=base_direction,
+        baseline_direction_correct=(
+            base_direction == outcome.realized_direction
+            if base_direction and outcome.realized_direction
+            else None
+        ),
+        baseline_signed_error_pct=outcome.baseline_signed_error_pct,
+        baseline_in_80pct_band=outcome.baseline_in_80pct_band,
         predicted_direction=outcome.predicted_direction,
         realized_direction=outcome.realized_direction,
         direction_correct=outcome.direction_correct,
@@ -167,7 +185,7 @@ def summarize_scorecards(cards: Scorecards) -> ScorecardSummary:
 
 
 def summarize_track_record(record: ForecastTrackRecord) -> OutcomeMetrics:
-    """The final forecast's metrics per rolling window."""
+    """The final forecast's metrics per rolling window, with every benchmark's."""
     windows = []
     for w in record.windows:
         final = next((v for v in w.variants if v.variant == "final"), None)
@@ -183,6 +201,17 @@ def summarize_track_record(record: ForecastTrackRecord) -> OutcomeMetrics:
                 n_adjusted=w.n_adjusted,
                 llm_value_added=w.llm_value_added.mean if w.n_adjusted else None,
                 finding=w.finding,
+                variants=[
+                    VariantMetrics(
+                        variant=v.variant,
+                        label=VARIANT_LABELS[v.variant],
+                        direction=v.direction,
+                        coverage_80pct=v.coverage_80pct,
+                        brier=v.brier,
+                        mean_abs_error_pct=v.mean_abs_error_pct,
+                    )
+                    for v in w.variants
+                ],
             )
         )
     return OutcomeMetrics(

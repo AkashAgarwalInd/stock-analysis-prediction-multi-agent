@@ -15,7 +15,7 @@ from stock_analysis.database import (
     get_database,
 )
 from stock_analysis.langgraph.review_graph import make_pre_run_reviewer
-from stock_analysis.langgraph.workflow import compile_graph
+from stock_analysis.langgraph.workflow import PriceFetcher, compile_graph
 from stock_analysis.learning import RssHindsightNewsSource
 from stock_analysis.logging import get_logger
 from stock_analysis.market.resolver import SymbolResolver
@@ -46,6 +46,7 @@ def run_forecast(
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
     outcome_store: Optional[OutcomeStore] = None,
+    price_fetcher: Optional[PriceFetcher] = None,
     review: bool = True,
     review_llm: bool = True,
     **review_options: Any,
@@ -65,7 +66,9 @@ def run_forecast(
     Postmortems use the forecast's LLM with hindsight news from RSS, as
     ``stock-analysis review`` does; ``review_llm=False`` makes them rules only
     (no LLM call, no news). ``review_options`` go to the review graph
-    (``price_source``, ``calendar``, ``news_source``).
+    (``price_source``, ``calendar``, ``news_source``). ``price_fetcher``
+    replaces the live price collector for the quant baseline, e.g. to reuse the
+    bars the technical indicators were computed from.
 
     Raises:
         ForecastSnapshotError: the snapshot tables are missing, or a completed
@@ -104,6 +107,7 @@ def run_forecast(
         store,
         memory_store,
         learning_store,
+        price_fetcher=price_fetcher,
         outcome_store=outcome_store,
         reviewer=reviewer,
     )

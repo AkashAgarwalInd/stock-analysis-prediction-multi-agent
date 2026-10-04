@@ -283,6 +283,67 @@ def backtest(
 
 
 @app.command()
+def analyze(
+    query: str = typer.Argument(
+        ..., help='NSE ticker or company name, e.g. RELIANCE or "tata motors"'
+    ),
+    database: Optional[str] = typer.Option(
+        None, "--database", help="Database to use, e.g. a backtest's (default: the app database)"
+    ),
+    llm: bool = typer.Option(
+        True,
+        "--llm/--no-llm",
+        help="LLM analysts, predictor and postmortems (otherwise quant only)",
+    ),
+    review: bool = typer.Option(
+        True, "--review/--no-review", help="Review matured forecasts before this one"
+    ),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write the report here"),
+) -> None:
+    """Forecast one stock: last forecast vs actual, adaptation, current analysis, quant
+    baseline, final forecast, track record and benchmarks."""
+    from rich.markdown import Markdown
+
+    from stock_analysis.analysis import run_analysis
+
+    if database and not Path(database).exists():
+        console.print(f"No database at {database}", markup=False)
+        raise typer.Exit(1)
+    if llm and not get_settings().gemini_api_key:
+        console.print(
+            "Warning: GEMINI_API_KEY is not set, so the LLM analysts will fail and the "
+            "forecast stays the quant baseline; use --no-llm for a quant-only run.",
+            markup=False,
+        )
+    db = Database(Path(database)) if database else init_database()
+    try:
+        with console.status(f"Analyzing {query}…"):
+            result = run_analysis(query, db, use_llm=llm, review=review)
+    except (ForecastSnapshotError, OutcomeStoreError, LearningStoreError, MemoryStoreError) as err:
+        console.print(f"Analysis failed: {err}", markup=False)
+        if not database:
+            console.print("Run `stock-analysis init` to create the database.", markup=False)
+        raise typer.Exit(1) from err
+    finally:
+        if database:
+            db.close()
+        else:
+            close_database()
+
+    for part, reason in result.unavailable_inputs.items():
+        console.print(f"Input not available ({part}): {reason}", markup=False)
+    report = result.report
+    if report is None:
+        console.print(f"No forecast for {result.resolved_symbol}: {result.error}", markup=False)
+        raise typer.Exit(1)
+    console.print(Markdown(report))
+    if output is not None:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_text(report)
+        console.print(f"Report written to {output}", markup=False)
+
+
+@app.command()
 def status() -> None:
     """Show application status."""
     settings = get_settings()

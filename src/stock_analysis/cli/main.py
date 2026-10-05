@@ -38,6 +38,7 @@ from stock_analysis.learning import (
 )
 from stock_analysis.llm.usage import LLMCallRecord, LLMUsageSummary
 from stock_analysis.logging import configure_logging, get_logger
+from stock_analysis.market.resolver import resolve_nse_ticker
 from stock_analysis.review import render_last_forecast_vs_actual
 from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeStatus
 
@@ -256,7 +257,10 @@ def backtest(
         None, "--end", help="Last target date (YYYY-MM-DD); default: latest completed week"
     ),
     database: Optional[str] = typer.Option(
-        None, "--database", help="Database to write (default: a new file in data/backtests/)"
+        None,
+        "--database",
+        help="Database to write (default: the app database, which evaluate, calibration "
+        "and analyze read)",
     ),
     llm: bool = typer.Option(
         True, "--llm/--no-llm", help="Use LLM analysts and postmortems (otherwise quant only)"
@@ -266,12 +270,13 @@ def backtest(
     """Simulate weekly forecasts point-in-time, scoring and learning week by week."""
     from stock_analysis.backtest import (
         BacktestError,
+        LaterHistoryError,
         default_database_path,
         render_backtest_report,
         run_backtest,
     )
 
-    path = Path(database) if database else default_database_path(ticker.upper(), datetime.now(UTC))
+    path = Path(database) if database else get_settings().database_path
     try:
         result = run_backtest(
             ticker,
@@ -285,6 +290,13 @@ def backtest(
         )
     except (BacktestError, ValueError) as err:
         console.print(f"Backtest failed: {err}", markup=False)
+        if isinstance(err, LaterHistoryError) and database is None:
+            new = default_database_path(resolve_nse_ticker(ticker)[0], datetime.now(UTC))
+            console.print(
+                f"To backtest into a new database, add --database {new}, and pass the same "
+                "--database to evaluate, calibration and analyze.",
+                markup=False,
+            )
         raise typer.Exit(1) from err
     report = render_backtest_report(result)
     console.print(report, markup=False)

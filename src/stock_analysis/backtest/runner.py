@@ -85,6 +85,10 @@ class BacktestError(RuntimeError):
     """The backtest cannot run as requested."""
 
 
+class LaterHistoryError(BacktestError):
+    """The database already holds history from the backtest period onwards."""
+
+
 # Timestamped, append-only records a backtest writes, by table and time column
 _HISTORY_COLUMNS = {
     "forecast_snapshots": "made_at",
@@ -199,6 +203,7 @@ def backtest_schedule(
 
 
 def default_database_path(ticker: str, now: datetime) -> Path:
+    """A new backtest database for ``ticker`` (without the exchange suffix) under data/backtests."""
     return Path("data/backtests") / f"{ticker}-{now:%Y%m%d-%H%M%S}.db"
 
 
@@ -219,8 +224,9 @@ def run_backtest(
     week whose target session has completed), learning between weeks.
 
     Raises:
-        BacktestError: an invalid request, or the database already holds forecasts for
-            this ticker inside the backtest period (a re-run would duplicate history).
+        BacktestError: an invalid request.
+        LaterHistoryError: the database already holds history (any ticker) timestamped
+            at or after the first simulated forecast.
     """
     settings = get_settings()
     calendar = calendar or get_trading_calendar()
@@ -285,7 +291,7 @@ def _run(
     later = later_history(db, forecast_time(first_as_of))
     if later:
         found = ", ".join(f"{n} in {table}" for table, n in later.items())
-        raise BacktestError(
+        raise LaterHistoryError(
             f"{database_path} already has history from {first_as_of} onwards ({found}); "
             "a backtest can only add history after what a database already holds — "
             "use a new database"

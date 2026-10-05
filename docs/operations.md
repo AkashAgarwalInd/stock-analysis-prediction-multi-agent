@@ -111,4 +111,4 @@ the previous close as a zero-volume bar on a holiday; such bars are dropped.
 | Many `external_call_retrying` warnings for yfinance | Yahoo is throttling: lower `YFINANCE_REQUESTS_PER_MINUTE` |
 | `LLM call budget of N calls for this run is spent` | Raise `LLM_MAX_CALLS_PER_RUN`, or check for a revision loop (`MAX_REVISIONS`) |
 | A backtest week is `invalid: … sessions the forecast calendar did not expect` | The calendar and the data disagree about a session; see "Trading calendar" |
-| `Backtest failed: … already has history from …` | Backtests only append later history; use a new database |
+| `Backtest failed: … already has history from …` | Backtests only append history after what the database holds (e.g. the app database after an `analyze` or an earlier backtest): add the suggested `--database data/backtests/….db`, and pass it to `evaluate`/`calibration`/`analyze` too |

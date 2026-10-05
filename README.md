@@ -41,17 +41,23 @@ stock-agents init             # create data/stock_analysis.db and run migrations
 python demo.py --no-llm       # full demo on RELIANCE, INFY and HDFCBANK, no API key needed
 ```
 
-The demo runs the Plan.md §76 acceptance flow on three stocks. Each stock gets its own database
-under `data/demo/<time>/<TICKER>/`:
+The Plan.md §76 acceptance flow runs as written against the app database:
 
 ```bash
-stock-agents backtest --ticker RELIANCE --weeks 12 --database data/demo.db   # 12 weeks, point-in-time
-stock-agents evaluate --ticker RELIANCE --database data/demo.db              # track record vs benchmarks
-stock-agents calibration --ticker RELIANCE --database data/demo.db           # calibration versions
-stock-agents analyze RELIANCE --database data/demo.db                        # today's forecast, reviewed
+stock-agents backtest --ticker RELIANCE.NS --weeks 12   # 12 weeks, point-in-time, scored and learned
+stock-agents evaluate --ticker RELIANCE.NS              # track record vs benchmarks
+stock-agents calibration --ticker RELIANCE.NS           # calibration versions
+stock-agents analyze RELIANCE                           # today's forecast, reviewed and calibrated
 ```
 
-The demo then checks that every analysis report shows the 15 items of §76 and prints a summary.
+A backtest only appends history after what its database already holds (any ticker), so it
+works on a fresh app database. To run another one later, pass `--database
+data/backtests/<name>.db` to `backtest` and the same `--database` to the other commands; the
+error message suggests a path.
+
+The demo runs the same flow on three stocks, each in its own database under
+`data/demo/<time>/<TICKER>/`, checks that every analysis report shows the 15 items of §76 and
+prints a summary.
 Use `python demo.py --tickers TCS ITC --weeks 8`, `--llm` and `--show-reports` to vary it.
 
 Without `GEMINI_API_KEY` the LLM path still runs: the analysts degrade and the quant baseline
@@ -65,7 +71,7 @@ ships. `--no-llm` skips the LLM entirely.
 |---|---|
 | `init` / `migrate` | Create the database / apply Alembic migrations |
 | `analyze QUERY [--database P] [--no-llm] [--no-review] [-o report.md]` | Live forecast for a ticker or company name (`"tata motors"`) |
-| `backtest --ticker T --weeks N [--end D] [--no-llm] [--database P] [-o F]` | Weekly forecasts simulated point-in-time, each scored and learned from in order |
+| `backtest --ticker T --weeks N [--end D] [--no-llm] [--database P] [-o F]` | Weekly forecasts simulated point-in-time, each scored and learned from in order (default: into the app database) |
 | `review [--ticker T \| --all] [--no-llm]` | Score matured forecasts, write postmortems, update lessons and calibration |
 | `history --ticker T [--database P]` | Stored forecasts with their outcomes |
 | `evaluate [--ticker T] [--database P]` | Track record (8/26 weeks, all time) against the benchmarks, plus reliability |

@@ -40,6 +40,7 @@ from stock_analysis.schemas.memory import LessonCandidate
 from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeStatus
 from stock_analysis.schemas.snapshot import ForecastSnapshot
 from stock_analysis.snapshots.builder import IST, NSE_CLOSE_IST
+from stock_analysis.untrusted import sanitize_untrusted_text
 from stock_analysis.versions import POSTMORTEM_PROMPT_FILE, PROMPTS_DIR, get_postmortem_version
 
 logger = get_logger(__name__)
@@ -49,6 +50,7 @@ NOISE_VOL_RATIO_RANGE = (0.5, 2.0)
 VOL_UNDERESTIMATED_RATIO = 1.2
 VOL_OVERESTIMATED_RATIO = 0.8
 MARKET_MOVE_MIN_PCT = 1.0
+MAX_NEWS_FACT_CHARS = 300
 
 _EVENT_SOURCES = frozenset({"corporate_action", "news"})
 _DECIMAL_RE = re.compile(r"\d+\.\d+")
@@ -201,15 +203,18 @@ def _hindsight_texts(
         detail = ", ".join(f"{k} {v}" for k, v in action.items() if k not in ("date", "type"))
         out.append(("corporate_action", f"{action.get('type')} on {action.get('date')}: {detail}"))
     out += [("data_quality", f"Evaluation check: {c}") for c in outcome.validity_checks]
-    out += [
-        (
-            "news",
-            f"{item.published_at.astimezone(IST):%Y-%m-%d %H:%M} IST"
-            + (f" ({item.source})" if item.source else "")
-            + f": {item.headline}",
+    for item in news:
+        # Untrusted web text (Plan.md §49): cleaned before it can reach the prompt
+        headline, _ = sanitize_untrusted_text(item.headline, MAX_NEWS_FACT_CHARS)
+        source, _ = sanitize_untrusted_text(item.source, 100)
+        out.append(
+            (
+                "news",
+                f"{item.published_at.astimezone(IST):%Y-%m-%d %H:%M} IST"
+                + (f" ({source})" if source else "")
+                + f": {headline}",
+            )
         )
-        for item in news
-    ]
     return out
 
 

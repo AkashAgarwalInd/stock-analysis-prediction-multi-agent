@@ -23,11 +23,13 @@ change what point-in-time reads of that later history return.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from stock_analysis.backtest.data import (
@@ -46,6 +48,7 @@ from stock_analysis.database import (
     Database,
     ForecastSnapshotStore,
     LearningStore,
+    LLMCallStore,
     MemoryStore,
     OutcomeStore,
 )
@@ -55,6 +58,7 @@ from stock_analysis.langgraph.review_graph import compile_review_graph, invoke_r
 from stock_analysis.langgraph.workflow import compile_graph
 from stock_analysis.learning import build_evaluation, build_scorecards, compare_benchmarks
 from stock_analysis.llm.factory import DisabledLLM
+from stock_analysis.llm.usage import LLMUsageSummary, LLMUsageTracker, track_llm_usage
 from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar, get_trading_calendar
 from stock_analysis.market.resolver import resolve_nse_ticker
@@ -152,6 +156,7 @@ class BacktestResult(BaseModel):
     scorecards: Scorecards
     evaluation: EvaluationReport
     errors: list[str] = Field(default_factory=list)
+    llm_usage: LLMUsageSummary = Field(default_factory=LLMUsageSummary)
 
 
 def evaluation_time(session: date) -> datetime:
@@ -230,20 +235,29 @@ def run_backtest(
 
     upgrade_database(database_path)
     db = Database(database_path)
+    # Every LLM call of the backtest is logged to its database (Plan.md §51); no budget
+    tracker = LLMUsageTracker(
+        run_id=f"backtest-{uuid.uuid4().hex}", ticker=base, sink=LLMCallStore(db).record
+    )
     try:
-        return _run(
-            base,
-            symbol,
-            company,
-            schedule,
-            db=db,
-            database_path=database_path,
-            llm_factory=llm_factory,
-            use_llm=use_llm,
-            calendar=calendar,
-            history_loader=history_loader,
-            progress=progress,
-        )
+        with (
+            track_llm_usage(tracker),
+            structlog.contextvars.bound_contextvars(run_id=tracker.run_id, ticker=base),
+        ):
+            result = _run(
+                base,
+                symbol,
+                company,
+                schedule,
+                db=db,
+                database_path=database_path,
+                llm_factory=llm_factory,
+                use_llm=use_llm,
+                calendar=calendar,
+                history_loader=history_loader,
+                progress=progress,
+            )
+        return result.model_copy(update={"llm_usage": tracker.summary()})
     finally:
         db.close()
 

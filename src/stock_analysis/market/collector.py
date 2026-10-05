@@ -9,6 +9,7 @@ import pandas as pd
 import yfinance as yf
 
 from stock_analysis.logging import get_logger
+from stock_analysis.reliability import get_rate_limiter
 
 if TYPE_CHECKING:
     from stock_analysis.market.cache import PriceCache
@@ -110,6 +111,7 @@ class MarketPriceCollector:
 
         for attempt in range(self.max_retries + 1):
             try:
+                get_rate_limiter("yfinance").acquire()
                 ticker = yf.Ticker(symbol)
                 if start and end:
                     hist = ticker.history(

@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +15,7 @@ from stock_analysis.database import (
     ForecastSnapshotStore,
     LearningStore,
     LearningStoreError,
+    LLMCallStore,
     MemoryStore,
     MemoryStoreError,
     OutcomeStore,
@@ -35,8 +36,10 @@ from stock_analysis.learning import (
     render_scorecards,
     render_track_record,
 )
+from stock_analysis.llm.usage import LLMCallRecord, LLMUsageSummary
 from stock_analysis.logging import configure_logging, get_logger
 from stock_analysis.review import render_last_forecast_vs_actual
+from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeStatus
 
 app = typer.Typer(
     name="stock-analysis",
@@ -83,6 +86,9 @@ def migrate() -> None:
 @app.command()
 def review(
     ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    all_tickers: bool = typer.Option(
+        False, "--all", help="Every ticker (the default when --ticker is not given)"
+    ),
     llm: bool = typer.Option(
         True,
         "--llm/--no-llm",
@@ -92,6 +98,10 @@ def review(
     """Run the review graph: score matured forecasts, diagnose them, update lessons and
     calibration, then show the scorecards and track record."""
     from stock_analysis.langgraph.review_graph import run_review
+
+    if all_tickers and ticker:
+        console.print("Use either --ticker or --all, not both.", markup=False)
+        raise typer.Exit(2)
 
     db = init_database()
     try:
@@ -134,6 +144,8 @@ def review(
             console.print(render_track_record(state.evaluation.track_record), markup=False)
         for error in state.errors:
             console.print(f"Review error: {error}", markup=False)
+        if llm and state.llm_usage is not None:
+            console.print(state.llm_usage.describe(), markup=False)
     except (ForecastSnapshotError, OutcomeStoreError, LearningStoreError, MemoryStoreError) as err:
         console.print(f"Review failed: {err}", markup=False)
         raise typer.Exit(1) from err
@@ -337,10 +349,108 @@ def analyze(
         console.print(f"No forecast for {result.resolved_symbol}: {result.error}", markup=False)
         raise typer.Exit(1)
     console.print(Markdown(report))
+    if llm:
+        console.print(result.llm_usage.describe(), markup=False)
     if output is not None:
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         Path(output).write_text(report)
         console.print(f"Report written to {output}", markup=False)
+
+
+def _pct(value: Optional[float]) -> str:
+    return "" if value is None else f"{value:+.2f}%"
+
+
+@app.command()
+def history(
+    ticker: str = typer.Option(..., "--ticker", "-t", help="NSE ticker, e.g. RELIANCE"),
+    database: Optional[str] = typer.Option(None, "--database", help=_DATABASE_HELP),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Newest forecasts to show"),
+) -> None:
+    """List a ticker's stored forecasts (originals, newest first) with their outcomes."""
+    with _read_database(database) as db:
+        base = _base_ticker(ticker) or ticker
+        snapshots = ForecastSnapshotStore(db).list_for_ticker(base)[:limit]
+        if not snapshots:
+            console.print(f"No stored forecasts for {base}.", markup=False)
+            return
+        outcomes = OutcomeStore(db)
+        table = Table(title=f"Forecast history: {base}")
+        for column in (
+            "As of", "Target", "Cal.", "P10–P90", "P50", "P(up)", "Adj.",
+            "Actual", "Return", "Band", "Direction", "Status",
+        ):  # fmt: skip
+            table.add_column(column)
+        for snap in snapshots:
+            f = snap.final_forecast
+            table.add_row(
+                snap.as_of_date.isoformat(),
+                snap.target_date.isoformat(),
+                f"v{snap.calibration_version}",
+                f"{f.p10_price:.2f}–{f.p90_price:.2f}",
+                f"{f.p50_price:.2f}",
+                f"{f.prob_up:.2f}",
+                "yes" if f.adjustment_applied else "no",
+                *_outcome_cells(outcomes.get(snap.forecast_id)),
+            )
+        console.print(table)
+
+
+def _outcome_cells(outcome: Optional[ForecastOutcome]) -> list[str]:
+    """Actual, return, band, direction and status columns of ``history``."""
+    if outcome is None:
+        return ["", "", "", "", "pending"]
+    if outcome.status != OutcomeStatus.SCORED:
+        return ["", "", "", "", outcome.status.value]
+    actual = outcome.actual_close_on_forecast_basis
+    return [
+        "" if actual is None else f"{actual:.2f}",
+        _pct(outcome.actual_return_pct),
+        "in" if outcome.in_80pct_band else "out",
+        "correct" if outcome.direction_correct else "wrong",
+        outcome.status.value,
+    ]
+
+
+@app.command()
+def usage(
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Only this ticker"),
+    database: Optional[str] = typer.Option(None, "--database", help=_DATABASE_HELP),
+    days: Optional[int] = typer.Option(None, "--days", min=1, help="Only the last N days"),
+) -> None:
+    """Show LLM calls, tokens and estimated cost from the call log."""
+    with _read_database(database) as db:
+        store = LLMCallStore(db)
+        if not store.available():
+            console.print(
+                "This database has no LLM call log; run `stock-analysis migrate`.", markup=False
+            )
+            raise typer.Exit(1)
+        since = datetime.now(UTC) - timedelta(days=days) if days else None
+        calls = store.calls(ticker=_base_ticker(ticker), since=since)
+        console.print(LLMUsageSummary.of(calls).describe(), markup=False)
+        if not calls:
+            return
+        groups: dict[tuple[str, str], list[LLMCallRecord]] = {}
+        for call in calls:
+            groups.setdefault((call.node or "unknown", call.model), []).append(call)
+        table = Table(title="LLM calls by node and model")
+        for column in ("Node", "Model", "Calls", "Failed", "Prompt tok.", "Completion tok.",
+                       "Mean latency (ms)", "Est. cost ($)"):  # fmt: skip
+            table.add_column(column)
+        for (node, model), group in sorted(groups.items()):
+            summary = LLMUsageSummary.of(group)
+            table.add_row(
+                node,
+                model,
+                str(summary.calls),
+                str(summary.failed_calls),
+                f"{summary.prompt_tokens:,}",
+                f"{summary.completion_tokens:,}",
+                str(round(sum(c.latency_ms for c in group) / len(group))),
+                f"{summary.cost_est:.4f}",
+            )
+        console.print(table)
 
 
 @app.command()

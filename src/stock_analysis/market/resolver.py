@@ -5,6 +5,7 @@ from typing import Optional
 import yfinance as yf
 
 from stock_analysis.logging import get_logger
+from stock_analysis.reliability import get_rate_limiter
 
 logger = get_logger(__name__)
 
@@ -179,6 +180,7 @@ class SymbolResolver:
         test_symbol = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
         try:
+            get_rate_limiter("yfinance").acquire()
             ticker = yf.Ticker(test_symbol)
             info = ticker.info
             is_valid = bool(info.get("symbol") or info.get("shortName") or info.get("longName"))

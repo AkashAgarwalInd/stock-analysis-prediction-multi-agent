@@ -4,12 +4,18 @@ calibration."""
 
 from __future__ import annotations
 
+import time
+import uuid
 from typing import Any, Optional
 
+import structlog
+
+from stock_analysis.config.settings import get_settings
 from stock_analysis.database import (
     ForecastSnapshotError,
     ForecastSnapshotStore,
     LearningStore,
+    LLMCallStore,
     MemoryStore,
     OutcomeStore,
     get_database,
@@ -17,6 +23,7 @@ from stock_analysis.database import (
 from stock_analysis.langgraph.review_graph import make_pre_run_reviewer
 from stock_analysis.langgraph.workflow import PriceFetcher, compile_graph
 from stock_analysis.learning import RssHindsightNewsSource
+from stock_analysis.llm.usage import LLMUsageTracker, track_llm_usage
 from stock_analysis.logging import get_logger
 from stock_analysis.market.resolver import SymbolResolver
 from stock_analysis.schemas.graph_state import GraphState
@@ -38,6 +45,23 @@ def _with_company_name(state: GraphState) -> GraphState:
     return state.model_copy(update={"company_name": resolved.name})
 
 
+def _usage_tracker(
+    tracker: Optional[LLMUsageTracker], store: ForecastSnapshotStore, symbol: str
+) -> tuple[LLMUsageTracker, Optional[LLMCallStore]]:
+    """The run's usage tracker, writing to ``llm_calls`` in the forecast database when the
+    table exists (an older database only keeps the totals in memory)."""
+    tracker = tracker or LLMUsageTracker(max_calls=get_settings().llm_max_calls_per_run)
+    tracker.run_id = tracker.run_id or uuid.uuid4().hex
+    tracker.ticker = tracker.ticker or symbol
+    call_store = LLMCallStore(store.db)
+    if not call_store.available():
+        logger.warning("llm_call_log_unavailable", hint="run `stock-analysis migrate`")
+        return tracker, None
+    if tracker.sink is None:
+        tracker.sink = call_store.record
+    return tracker, call_store
+
+
 def run_forecast(
     initial_state: GraphState,
     *,
@@ -49,6 +73,7 @@ def run_forecast(
     price_fetcher: Optional[PriceFetcher] = None,
     review: bool = True,
     review_llm: bool = True,
+    usage_tracker: Optional[LLMUsageTracker] = None,
     **review_options: Any,
 ) -> GraphState:
     """Run the forecast graph and guarantee every completed forecast is stored.
@@ -69,6 +94,12 @@ def run_forecast(
     (``price_source``, ``calendar``, ``news_source``). ``price_fetcher``
     replaces the live price collector for the quant baseline, e.g. to reuse the
     bars the technical indicators were computed from.
+
+    Every LLM call of the run (including the pre-run review's postmortems) is
+    counted by ``usage_tracker`` (default: a new one) against
+    ``LLM_MAX_CALLS_PER_RUN`` and stored in ``llm_calls`` when that table
+    exists, linked to the stored forecast. Logs inside the run carry its
+    ``run_id`` and ``ticker``.
 
     Raises:
         ForecastSnapshotError: the snapshot tables are missing, or a completed
@@ -111,8 +142,30 @@ def run_forecast(
         outcome_store=outcome_store,
         reviewer=reviewer,
     )
-    result = graph.invoke(_with_company_name(initial_state))
-    final = result if isinstance(result, GraphState) else GraphState(**result)
+    tracker, call_store = _usage_tracker(usage_tracker, store, initial_state.symbol)
+    started = time.perf_counter()
+    with (
+        track_llm_usage(tracker),
+        structlog.contextvars.bound_contextvars(run_id=tracker.run_id, ticker=initial_state.symbol),
+    ):
+        result = graph.invoke(_with_company_name(initial_state))
+        final = result if isinstance(result, GraphState) else GraphState(**result)
+        usage = tracker.summary()
+        logger.info(
+            "forecast_run_completed",
+            forecast_id=final.forecast_id,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            status="ok" if final.forecast_id else "incomplete",
+            llm_calls=usage.calls,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            estimated_cost=round(usage.cost_est, 6),
+        )
+    if call_store is not None and final.forecast_id and tracker.run_id:
+        try:
+            call_store.attach_forecast(tracker.run_id, final.forecast_id)
+        except Exception as err:  # telemetry never fails a stored forecast
+            logger.warning("llm_calls_not_linked", error=str(err))
 
     forecast = final.final_forecast
     if not forecast or "error" in forecast:

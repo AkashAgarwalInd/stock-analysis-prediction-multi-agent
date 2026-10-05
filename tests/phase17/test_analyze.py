@@ -148,7 +148,7 @@ class TestCollectInputs:
         assert news["article_count"] == 12
         assert len(news["articles"]) == analysis.inputs.MAX_NEWS_ARTICLES
         assert news["articles"][0]["title"] == "Reliance update 11 & outlook"  # newest first
-        assert news["articles"][0]["summary"] == "Refining margins\xa0improved"
+        assert news["articles"][0]["summary"] == "Refining margins improved"  # &nbsp; normalized
 
     def test_failing_source_is_recorded_not_raised(self):
         source = FakeSource(fail={"fundamentals", "news"})

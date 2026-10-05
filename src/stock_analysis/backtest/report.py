@@ -34,6 +34,7 @@ def render_backtest_report(result: BacktestResult) -> str:
         "",
         f"- Database: `{result.database_path}`",
         f"- LLM: {'enabled' if result.llm_enabled else 'disabled (quant-only)'}",
+        *([f"- {result.llm_usage.describe()}"] if result.llm_enabled else []),
         "- Each week was forecast with only the data, lessons and calibration available at "
         "its as-of close, then scored before the next week was forecast.",
         "",

@@ -10,6 +10,11 @@ import pytest
 
 os.environ.setdefault("APP_ENV", "testing")
 os.environ.setdefault("GEMINI_API_KEY", "test-key-12345")
+# Phase 18: tests never wait for rate limits or retry backoff
+for _name in ("LLM_REQUESTS_PER_MINUTE", "YFINANCE_REQUESTS_PER_MINUTE", "NEWS_REQUESTS_PER_MINUTE"):
+    os.environ.setdefault(_name, "0")
+for _name in ("LLM_RETRY_BASE_DELAY_SECONDS", "EXTERNAL_RETRY_BASE_DELAY_SECONDS"):
+    os.environ.setdefault(_name, "0")
 
 
 @pytest.fixture(autouse=True)

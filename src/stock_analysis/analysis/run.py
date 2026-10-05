@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from stock_analysis.analysis.inputs import InputSource, LiveInputSource, collect_inputs
+from stock_analysis.config.settings import get_settings
 from stock_analysis.database import (
     Database,
     ForecastSnapshotStore,
@@ -22,6 +23,7 @@ from stock_analysis.database import (
 )
 from stock_analysis.langgraph.runner import run_forecast
 from stock_analysis.llm.factory import DisabledLLM
+from stock_analysis.llm.usage import LLMUsageSummary, LLMUsageTracker
 from stock_analysis.logging import get_logger
 from stock_analysis.market.resolver import resolve_nse_ticker
 from stock_analysis.schemas.graph_state import GraphState
@@ -41,6 +43,7 @@ class AnalysisResult:
     company_name: str
     state: GraphState
     unavailable_inputs: dict[str, str] = field(default_factory=dict)
+    llm_usage: LLMUsageSummary = field(default_factory=LLMUsageSummary)
 
     @property
     def report(self) -> Optional[str]:
@@ -103,6 +106,7 @@ def run_analysis(
         return bars
 
     logger.info("analysis_started", query=query, symbol=symbol, llm=use_llm)
+    tracker = LLMUsageTracker(ticker=ticker, max_calls=get_settings().llm_max_calls_per_run)
     final = run_forecast(
         inputs.state,
         llm_factory=llm_factory if use_llm else DisabledLLM(),
@@ -113,6 +117,7 @@ def run_analysis(
         price_fetcher=prices,
         review=review,
         review_llm=use_llm,
+        usage_tracker=tracker,
         **review_options,
     )
     return AnalysisResult(
@@ -121,4 +126,5 @@ def run_analysis(
         company_name=company,
         state=final,
         unavailable_inputs=inputs.unavailable,
+        llm_usage=tracker.summary(),
     )

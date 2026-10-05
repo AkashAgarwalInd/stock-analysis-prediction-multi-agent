@@ -16,8 +16,15 @@ from typing import Optional
 
 import pandas as pd
 
+from stock_analysis.config.settings import get_settings
 from stock_analysis.logging import get_logger
-from stock_analysis.review.prices import PriceBar, PriceSeries
+from stock_analysis.reliability import (
+    RetryPolicy,
+    get_rate_limiter,
+    is_retryable_data_error,
+    retry_call,
+)
+from stock_analysis.review.prices import PriceBar, PriceSeries, is_placeholder_bar
 
 logger = get_logger(__name__)
 
@@ -146,12 +153,19 @@ def load_yfinance_history(symbols: Iterable[str], start: date, end: date) -> His
     data: dict[str, list[HistoricalBar]] = {}
     for symbol in symbols:
         try:
-            hist = yf.Ticker(symbol).history(
-                start=start.isoformat(),
-                end=(end + timedelta(days=1)).isoformat(),  # yfinance's end is exclusive
-                interval="1d",
-                actions=True,
-                auto_adjust=True,
+            hist = retry_call(
+                lambda symbol=symbol: yf.Ticker(symbol).history(
+                    start=start.isoformat(),
+                    end=(end + timedelta(days=1)).isoformat(),  # yfinance's end is exclusive
+                    interval="1d",
+                    actions=True,
+                    auto_adjust=True,
+                    timeout=get_settings().external_request_timeout_seconds,
+                ),
+                operation=f"yfinance:backtest_history:{symbol}",
+                policy=RetryPolicy.for_external_data(),
+                retryable=is_retryable_data_error,
+                limiter=get_rate_limiter("yfinance"),
             )
         except Exception as err:  # the SDK raises many unrelated error types
             logger.warning("backtest_history_failed", symbol=symbol, error=str(err))
@@ -162,9 +176,12 @@ def load_yfinance_history(symbols: Iterable[str], start: date, end: date) -> His
             close = row.get("Close")
             if close is None or math.isnan(float(close)):
                 continue
+            day = idx.date() if hasattr(idx, "date") else idx
+            if is_placeholder_bar(day, row.get("Volume")):
+                continue
             bars.append(
                 HistoricalBar(
-                    date=idx.date() if hasattr(idx, "date") else idx,
+                    date=day,
                     open=float(row.get("Open", close)),
                     high=float(row.get("High", close)),
                     low=float(row.get("Low", close)),

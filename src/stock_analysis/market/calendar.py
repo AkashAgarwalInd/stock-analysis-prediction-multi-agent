@@ -7,7 +7,12 @@ from stock_analysis.logging import get_logger
 logger = get_logger(__name__)
 
 
+# Weekday NSE holidays. Checked against Nifty 50 daily bars through 2026-10-02 (a
+# weekday without a session is a holiday, a listed date with one is not), except the
+# Diwali Laxmi Pujan dates: official holidays that only hold a one-hour Muhurat
+# session. Dates after 2026-10-02 follow the published NSE list and are unverified.
 NSE_HOLIDAYS_2024 = {
+    date(2024, 1, 22),   # Special holiday (Ayodhya Ram Mandir)
     date(2024, 1, 26),   # Republic Day
     date(2024, 3, 8),    # Mahashivratri
     date(2024, 3, 25),   # Holi
@@ -15,51 +20,51 @@ NSE_HOLIDAYS_2024 = {
     date(2024, 4, 11),   # Id-Ul-Fitr
     date(2024, 4, 17),   # Ram Navami
     date(2024, 5, 1),    # Maharashtra Day
+    date(2024, 5, 20),   # Lok Sabha election (Mumbai)
     date(2024, 6, 17),   # Bakri Id
     date(2024, 7, 17),   # Muharram
     date(2024, 8, 15),   # Independence Day
     date(2024, 10, 2),   # Gandhi Jayanti
-    date(2024, 11, 1),   # Diwali Laxmi Pujan
+    date(2024, 11, 1),   # Diwali Laxmi Pujan (Muhurat session only)
     date(2024, 11, 15),  # Guru Nanak Jayanti
+    date(2024, 11, 20),  # Maharashtra assembly election
     date(2024, 12, 25),  # Christmas
 }
 
 NSE_HOLIDAYS_2025 = {
-    date(2025, 1, 26),   # Republic Day
     date(2025, 2, 26),   # Mahashivratri
     date(2025, 3, 14),   # Holi
     date(2025, 3, 31),   # Id-Ul-Fitr
-    date(2025, 4, 10),   # Ram Navami
+    date(2025, 4, 10),   # Mahavir Jayanti
     date(2025, 4, 14),   # Dr. Ambedkar Jayanti
     date(2025, 4, 18),   # Good Friday
     date(2025, 5, 1),    # Maharashtra Day
-    date(2025, 6, 7),    # Bakri Id
-    date(2025, 7, 6),    # Muharram
     date(2025, 8, 15),   # Independence Day
     date(2025, 8, 27),   # Ganesh Chaturthi
     date(2025, 10, 2),   # Gandhi Jayanti
-    date(2025, 10, 21),  # Diwali Laxmi Pujan
+    date(2025, 10, 21),  # Diwali Laxmi Pujan (Muhurat session only)
+    date(2025, 10, 22),  # Diwali Balipratipada
     date(2025, 11, 5),   # Guru Nanak Jayanti
     date(2025, 12, 25),  # Christmas
 }
 
 NSE_HOLIDAYS_2026 = {
+    date(2026, 1, 15),   # Maharashtra municipal elections
     date(2026, 1, 26),   # Republic Day
-    date(2026, 2, 15),   # Mahashivratri
-    date(2026, 3, 4),    # Holi
-    date(2026, 3, 20),   # Id-Ul-Fitr
+    date(2026, 3, 3),    # Holi
+    date(2026, 3, 26),   # Ram Navami
+    date(2026, 3, 31),   # Mahavir Jayanti
     date(2026, 4, 3),    # Good Friday
-    date(2026, 4, 6),    # Ram Navami
     date(2026, 4, 14),   # Dr. Ambedkar Jayanti
     date(2026, 5, 1),    # Maharashtra Day
-    date(2026, 5, 27),   # Bakri Id
-    date(2026, 7, 26),   # Muharram
-    date(2026, 8, 15),   # Independence Day
-    date(2026, 8, 27),   # Ganesh Chaturthi
+    date(2026, 5, 28),   # Bakri Id
+    date(2026, 6, 26),   # Muharram
+    date(2026, 9, 14),   # Ganesh Chaturthi
     date(2026, 10, 2),   # Gandhi Jayanti
-    date(2026, 10, 10),  # Diwali Laxmi Pujan
-    date(2026, 11, 24),  # Guru Nanak Jayanti
-    date(2026, 12, 25),  # Christmas
+    date(2026, 10, 20),  # Dussehra (unverified)
+    date(2026, 11, 10),  # Diwali Balipratipada (unverified)
+    date(2026, 11, 24),  # Guru Nanak Jayanti (unverified)
+    date(2026, 12, 25),  # Christmas (unverified)
 }
 
 ALL_HOLIDAYS = NSE_HOLIDAYS_2024 | NSE_HOLIDAYS_2025 | NSE_HOLIDAYS_2026

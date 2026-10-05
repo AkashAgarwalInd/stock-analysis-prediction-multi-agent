@@ -7,6 +7,7 @@ from .forecast_store import (
     SnapshotLineageError,
 )
 from .learning_store import LearningStore, LearningStoreError
+from .llm_call_store import LLMCallStore, LLMCallStoreError
 from .memory_store import MemoryStore, MemoryStoreError
 from .migrations import get_migration_status, run_migrations
 from .outcome_store import OutcomeStore, OutcomeStoreError
@@ -25,6 +26,8 @@ __all__ = [
     "SnapshotLineageError",
     "LearningStore",
     "LearningStoreError",
+    "LLMCallStore",
+    "LLMCallStoreError",
     "MemoryStore",
     "MemoryStoreError",
     "OutcomeStore",

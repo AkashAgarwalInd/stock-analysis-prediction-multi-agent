@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -5,6 +6,7 @@ from typing import Optional
 import yfinance as yf
 
 from stock_analysis.logging import get_logger
+from stock_analysis.reliability import RetryPolicy, get_rate_limiter
 
 logger = get_logger(__name__)
 
@@ -80,8 +82,12 @@ class FundamentalsCollector:
         base_symbol = symbol.replace(".NS", "").replace(".BO", "")
         ticker_symbol = base_symbol if base_symbol.endswith(".NS") else base_symbol + ".NS"
 
+        backoff = RetryPolicy.for_external_data()
         for attempt in range(self.max_retries):
+            if attempt:
+                time.sleep(backoff.delay(attempt - 1))
             try:
+                get_rate_limiter("yfinance").acquire()
                 ticker = yf.Ticker(ticker_symbol)
                 info = ticker.info
 

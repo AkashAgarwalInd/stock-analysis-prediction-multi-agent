@@ -67,6 +67,31 @@ class Settings(BaseSettings):
     probability_calibration_buckets: int = Field(default=10, ge=1, le=100)
     min_samples_probability_calibration: int = 20
 
+    # Plan.md Phase 18 hardening (§43, §48-51): retries, rate limits and LLM cost tracking.
+    # Rate limits are token buckets per external service; 0 disables the limit.
+    llm_requests_per_minute: float = Field(default=30.0, ge=0)
+    llm_rate_limit_burst: int = Field(default=4, ge=1)
+    yfinance_requests_per_minute: float = Field(default=120.0, ge=0)
+    yfinance_rate_limit_burst: int = Field(default=5, ge=1)
+    news_requests_per_minute: float = Field(default=30.0, ge=0)
+    news_rate_limit_burst: int = Field(default=3, ge=1)
+    # Retries with exponential backoff: total attempts per call (1 = no retry)
+    llm_retry_attempts: int = Field(default=3, ge=1)
+    llm_retry_base_delay_seconds: float = Field(default=2.0, ge=0)
+    llm_retry_max_delay_seconds: float = Field(default=30.0, ge=0)
+    llm_structured_output_repair: bool = True  # one re-prompt after a schema violation (§48)
+    llm_request_timeout_seconds: float = Field(default=120.0, gt=0)  # per Gemini request
+    external_retry_attempts: int = Field(default=3, ge=1)
+    external_retry_base_delay_seconds: float = Field(default=1.0, ge=0)
+    external_retry_max_delay_seconds: float = Field(default=20.0, ge=0)
+    external_request_timeout_seconds: float = Field(default=30.0, gt=0)  # yfinance downloads
+    # Cost tracking: estimated USD per million tokens (set to your model's price list)
+    llm_input_cost_per_million_tokens: float = Field(default=0.10, ge=0)
+    llm_output_cost_per_million_tokens: float = Field(default=0.40, ge=0)
+    llm_max_calls_per_run: int = Field(default=40, ge=0)  # 0 = no budget
+    # Untrusted text (news) shown to an LLM: per-item character limit
+    untrusted_text_max_chars: int = Field(default=500, ge=50)
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.database_path}"

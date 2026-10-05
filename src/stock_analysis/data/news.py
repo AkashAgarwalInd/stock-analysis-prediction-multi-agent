@@ -1,3 +1,4 @@
+import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -7,6 +8,7 @@ import feedparser
 import httpx
 
 from stock_analysis.logging import get_logger
+from stock_analysis.reliability import RetryPolicy, get_rate_limiter
 
 logger = get_logger(__name__)
 
@@ -109,8 +111,12 @@ class NewsCollector:
 
         items: list[NewsItem] = []
 
+        backoff = RetryPolicy.for_external_data()
         for attempt in range(self.max_retries):
+            if attempt:
+                await asyncio.sleep(backoff.delay(attempt - 1))
             try:
+                await get_rate_limiter("news").acquire_async()
                 client = self._get_client()
                 response = await client.get(self.GOOGLE_NEWS_RSS_URL, params=params)
                 response.raise_for_status()

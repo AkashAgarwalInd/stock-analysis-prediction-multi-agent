@@ -63,7 +63,7 @@ class TestMarketContextCollector:
 
         mock_ticker_instance = Mock()
         mock_ticker_instance.info.side_effect = lambda: mock_info(mock_ticker_instance._symbol) if hasattr(mock_ticker_instance, '_symbol') else {}
-        mock_ticker_instance.history.side_effect = lambda period: mock_history(mock_ticker_instance._symbol, period) if hasattr(mock_ticker_instance, '_symbol') else None
+        mock_ticker_instance.history.side_effect = lambda period, **_: mock_history(mock_ticker_instance._symbol, period) if hasattr(mock_ticker_instance, '_symbol') else None
 
         def create_ticker(symbol):
             instance = Mock()

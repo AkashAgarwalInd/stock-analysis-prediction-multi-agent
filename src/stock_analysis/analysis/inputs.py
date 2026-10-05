@@ -12,7 +12,6 @@ closing prices only.
 from __future__ import annotations
 
 import asyncio
-import html
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -30,12 +29,15 @@ from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar
 from stock_analysis.review.outcome_scorer import last_completed_trading_date
 from stock_analysis.schemas.graph_state import GraphState
+from stock_analysis.untrusted import sanitize_untrusted_text
 from stock_analysis.versions import QUANT_HISTORY_PERIOD
 
 logger = get_logger(__name__)
 
 MAX_NEWS_ARTICLES = 10
 _MAX_NEWS_SUMMARY_CHARS = 200
+_MAX_NEWS_TITLE_CHARS = 300
+_MAX_NEWS_SOURCE_CHARS = 100
 _DECIMALS = 4
 
 
@@ -125,22 +127,37 @@ def price_frame(bars: list[Any]) -> pd.DataFrame:
 
 
 def news_summary(news: NewsCollection) -> dict[str, Any]:
-    """Article count and the newest headlines (titles and short summaries only)."""
+    """Article count and the newest headlines (titles and short summaries only).
+
+    Headlines are untrusted web text: each one is sanitized for the LLM
+    (Plan.md §49), and ``redacted_items`` counts articles in which an
+    instruction-like phrase was removed.
+    """
     items = sorted(news.items, key=lambda i: i.published_at, reverse=True)
-    return {
+    articles, redacted = [], 0
+    for item in items[:MAX_NEWS_ARTICLES]:
+        title, t_hit = sanitize_untrusted_text(item.title, _MAX_NEWS_TITLE_CHARS)
+        summary, s_hit = sanitize_untrusted_text(item.summary, _MAX_NEWS_SUMMARY_CHARS)
+        source, src_hit = sanitize_untrusted_text(item.source, _MAX_NEWS_SOURCE_CHARS)
+        redacted += t_hit or s_hit or src_hit
+        articles.append(
+            {
+                "title": title,
+                "source": source,
+                "published_at": _plain(item.published_at),
+                "summary": summary or None,
+            }
+        )
+    out: dict[str, Any] = {
         "source": news.source,
         "fetched_at": _plain(news.fetched_at),
         "article_count": len(news.items),
-        "articles": [
-            {
-                "title": html.unescape(item.title),
-                "source": item.source,
-                "published_at": _plain(item.published_at),
-                "summary": html.unescape(item.summary or "")[:_MAX_NEWS_SUMMARY_CHARS] or None,
-            }
-            for item in items[:MAX_NEWS_ARTICLES]
-        ],
+        "articles": articles,
     }
+    if redacted:
+        logger.warning("news_instructions_redacted", symbol=news.symbol, articles=redacted)
+        out["redacted_items"] = redacted
+    return out
 
 
 def collect_inputs(

@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -5,6 +6,7 @@ from typing import Optional
 import yfinance as yf
 
 from stock_analysis.logging import get_logger
+from stock_analysis.reliability import RetryPolicy, get_rate_limiter
 
 logger = get_logger(__name__)
 
@@ -71,8 +73,12 @@ class MarketContextCollector:
         self.cache_ttl_hours = cache_ttl_hours
 
     def _get_quote(self, symbol: str) -> Optional[dict]:
+        backoff = RetryPolicy.for_external_data()
         for attempt in range(self.max_retries):
+            if attempt:
+                time.sleep(backoff.delay(attempt - 1))
             try:
+                get_rate_limiter("yfinance").acquire()
                 ticker = yf.Ticker(symbol)
                 info = ticker.info
                 if info and info.get("symbol"):
@@ -82,10 +88,14 @@ class MarketContextCollector:
         return None
 
     def _get_history(self, symbol: str, period: str = "2d") -> Optional[list]:
+        backoff = RetryPolicy.for_external_data()
         for attempt in range(self.max_retries):
+            if attempt:
+                time.sleep(backoff.delay(attempt - 1))
             try:
+                get_rate_limiter("yfinance").acquire()
                 ticker = yf.Ticker(symbol)
-                hist = ticker.history(period=period)
+                hist = ticker.history(period=period, timeout=self.timeout)
                 if not hist.empty:
                     return hist
             except Exception as e:

@@ -38,9 +38,18 @@ class TestTradingCalendar:
         assert self.calendar.is_trading_day(republic_day) is False
 
     def test_next_trading_day_friday_to_monday(self):
-        friday = date(2024, 1, 19)
+        friday = date(2024, 2, 9)
         next_day = self.calendar.next_trading_day(friday)
-        assert next_day == date(2024, 1, 22)
+        assert next_day == date(2024, 2, 12)
+
+    def test_special_holidays_are_not_sessions(self):
+        # Verified against Nifty 50 bars: no session on these weekdays
+        assert self.calendar.next_trading_day(date(2024, 1, 19)) == date(2024, 1, 23)
+        for day in (date(2024, 1, 22), date(2026, 1, 15), date(2026, 9, 14)):
+            assert self.calendar.is_trading_day(day) is False
+        # ...and sessions were held on these dates once listed as holidays
+        for day in (date(2026, 3, 4), date(2026, 8, 27)):
+            assert self.calendar.is_trading_day(day) is True
 
     def test_next_trading_day_before_holiday(self):
         thursday = date(2024, 1, 25)
@@ -58,12 +67,12 @@ class TestTradingCalendar:
         assert prev_day == date(2024, 1, 25)
 
     def test_get_trading_days_range(self):
-        start = date(2024, 1, 15)
-        end = date(2024, 1, 22)
+        start = date(2024, 2, 5)
+        end = date(2024, 2, 12)
         days = self.calendar.get_trading_days(start, end)
         assert len(days) == 6
-        assert days[0] == date(2024, 1, 15)
-        assert days[-1] == date(2024, 1, 22)
+        assert days[0] == date(2024, 2, 5)
+        assert days[-1] == date(2024, 2, 12)
 
     def test_get_trading_days_excludes_weekend(self):
         start = date(2024, 1, 20)
@@ -79,8 +88,8 @@ class TestTradingCalendar:
         assert days[0] == date(2024, 1, 25)
 
     def test_get_trading_days_count(self):
-        start = date(2024, 1, 15)
-        end = date(2024, 1, 22)
+        start = date(2024, 2, 5)
+        end = date(2024, 2, 12)
         count = self.calendar.get_trading_days_count(start, end)
         assert count == 6
 
@@ -116,13 +125,13 @@ class TestCalendarHelperFunctions:
         assert is_trading_day(date(2024, 1, 20)) is False
 
     def test_next_trading_day_helper(self):
-        next_day = next_trading_day(date(2024, 1, 19))
-        assert next_day == date(2024, 1, 22)
+        next_day = next_trading_day(date(2024, 2, 9))
+        assert next_day == date(2024, 2, 12)
 
     def test_previous_trading_day_helper(self):
         prev_day = previous_trading_day(date(2024, 1, 22))
         assert prev_day == date(2024, 1, 19)
 
     def test_get_trading_days_helper(self):
-        days = get_trading_days(date(2024, 1, 15), date(2024, 1, 22))
+        days = get_trading_days(date(2024, 2, 5), date(2024, 2, 12))
         assert len(days) == 6

@@ -14,6 +14,7 @@ from stock_analysis.quant.forecast import EWMAVolatility, QuantForecaster
 from stock_analysis.schemas.analyst_reports import AnalystReport
 from stock_analysis.schemas.forecast_pipeline import PredictorResult
 from stock_analysis.schemas.learning import PostmortemDiagnosis
+from stock_analysis.untrusted import UNTRUSTED_BEGIN, UNTRUSTED_END, UNTRUSTED_INSTRUCTION
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -28,7 +29,7 @@ POSTMORTEM_PROMPT_FILE = "postmortem.txt"
 
 # The predictor prompt is assembled in code (workflow.build_predictor_prompt);
 # bump this whenever that function's wording or constraints change.
-PREDICTOR_PROMPT_VERSION = "5"
+PREDICTOR_PROMPT_VERSION = "6"
 # Bump when the deterministic critic's checks or tolerances change.
 CRITIC_VERSION = "1"
 # Bump when the report layout changes.
@@ -62,6 +63,9 @@ def get_prompt_versions() -> dict[str, str]:
         for node, filename in ANALYST_PROMPT_FILES.items()
     }
     versions["predictor"] = PREDICTOR_PROMPT_VERSION
+    # The wrapper around untrusted news is assembled in code (untrusted.wrap_untrusted)
+    wrapper = "\n".join((UNTRUSTED_INSTRUCTION, UNTRUSTED_BEGIN, UNTRUSTED_END))
+    versions["untrusted_data_wrapper"] = "sha256:" + hashlib.sha256(wrapper.encode()).hexdigest()[:16]
     versions["analyst_response_schema"] = _schema_digest(AnalystReport)
     versions["predictor_response_schema"] = _schema_digest(PredictorResult)
     return versions

@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import itertools
 import sqlite3
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Optional, Protocol
 
+import structlog
 from langgraph.graph import END, StateGraph
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -40,12 +42,14 @@ from stock_analysis.database import (
     ForecastSnapshotStore,
     LearningStore,
     LearningStoreError,
+    LLMCallStore,
     MemoryStore,
     MemoryStoreError,
     OutcomeStore,
     OutcomeStoreError,
     get_database,
 )
+from stock_analysis.langgraph.observability import instrument_node
 from stock_analysis.learning import (
     HindsightNewsSource,
     LearningCycle,
@@ -53,6 +57,12 @@ from stock_analysis.learning import (
     build_evaluation,
     build_scorecards,
     compare_benchmarks,
+)
+from stock_analysis.llm.usage import (
+    LLMUsageSummary,
+    LLMUsageTracker,
+    current_tracker,
+    track_llm_usage,
 )
 from stock_analysis.logging import get_logger
 from stock_analysis.market.calendar import TradingCalendar
@@ -110,6 +120,8 @@ class ReviewState(BaseModel):
 
     completed_steps: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # Set by ``run_review``: the postmortems' LLM calls, tokens and estimated cost
+    llm_usage: Optional[LLMUsageSummary] = None
 
     def summary(self) -> PreRunReview:
         """The compact record a forecast run keeps of the review it ran first."""
@@ -254,7 +266,7 @@ def build_review_graph(
     }
     graph = StateGraph(ReviewState)
     for name in REVIEW_STEPS:
-        graph.add_node(name, _step(name, bodies[name]))
+        graph.add_node(name, instrument_node(name, _step(name, bodies[name])))
     graph.set_entry_point(REVIEW_STEPS[0])
     for current, following in itertools.pairwise(REVIEW_STEPS):
         graph.add_edge(current, following)
@@ -289,12 +301,16 @@ def run_review(
     outcome_store: Optional[OutcomeStore] = None,
     memory_store: Optional[MemoryStore] = None,
     learning_store: Optional[LearningStore] = None,
+    usage_tracker: Optional[LLMUsageTracker] = None,
     **kwargs: Any,
 ) -> ReviewState:
     """Production entry point: review matured forecasts and summarize the track record.
 
     Stores default to the application database; ``kwargs`` go to
     ``build_review_graph`` (price source, calendar, LLM factory, news source).
+    The postmortems' LLM calls are counted by ``usage_tracker`` (default: the
+    active one, else a new ``review-…`` run logged to ``llm_calls`` when that
+    table exists) and summarized in ``llm_usage``.
 
     Raises:
         ForecastSnapshotError, OutcomeStoreError, MemoryStoreError, LearningStoreError:
@@ -309,7 +325,18 @@ def run_review(
     graph = compile_review_graph(
         snapshot_store, outcome_store, memory_store, learning_store, **kwargs
     )
-    state = invoke_review(graph, run_at, ticker=ticker)
+    tracker = usage_tracker or current_tracker()
+    if tracker is None:
+        tracker = LLMUsageTracker(run_id=f"review-{uuid.uuid4().hex}", ticker=ticker)
+        call_store = LLMCallStore(snapshot_store.db)
+        if call_store.available():
+            tracker.sink = call_store.record
+    context = {"run_id": tracker.run_id, **({"ticker": ticker} if ticker else {})}
+    already = len(tracker.records)  # a shared tracker may hold earlier calls
+    with track_llm_usage(tracker), structlog.contextvars.bound_contextvars(**context):
+        state = invoke_review(graph, run_at, ticker=ticker)
+    usage = LLMUsageSummary.of(tracker.records[already:])
+    state = state.model_copy(update={"llm_usage": usage})
     logger.info(
         "review_completed",
         ticker=ticker,

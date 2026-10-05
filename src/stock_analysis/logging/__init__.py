@@ -44,9 +44,10 @@ def configure_logging() -> None:
 
     import logging
 
+    # stderr, so logs never mix with report output on stdout
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
     )
 

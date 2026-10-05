@@ -277,9 +277,9 @@ class TestSecondAnalysis:
 
         _, second = runs
         evaluation = build_evaluation(store, outcome_store, as_of=NOW_MATURED, ticker="RELIANCE")
-        window = evaluation.track_record.windows[-1]
+        window = evaluation.track_records[0].windows[-1]
         metrics = MemoryContext.model_validate(second.state.memory_context)
-        stored = metrics.track_record.outcome_metrics.windows[-1]
+        stored = metrics.track_record.outcome_metrics_by_source[0].windows[-1]
         assert [v.variant for v in stored.variants] == [v.variant for v in window.variants]
         for mine, theirs in zip(stored.variants, window.variants, strict=True):
             assert mine.direction == theirs.direction

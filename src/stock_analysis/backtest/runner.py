@@ -424,6 +424,7 @@ def _forecast_week(
         company_name=company,
         run_at=week.forecast_made_at,
         disabled_analysts=disabled,
+        forecast_source="backtest",
         technical_indicators_summary=technical_summary(view, symbol),
         market_context_summary=market_context_summary(view, symbol),
     )

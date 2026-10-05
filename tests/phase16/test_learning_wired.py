@@ -111,7 +111,7 @@ class TestSecondRunShowsReview:
         assert last.primary_cause == postmortem.primary_cause.value
         assert last.cause_explanation == postmortem.explanation
         # the track record now carries rolling metrics, and the scorecards the regime
-        metrics = context.track_record.outcome_metrics
+        metrics = context.track_record.outcome_metrics_by_source[0]
         assert metrics.n_forecasts == 1
         assert metrics.windows[0].n == 1
         assert context.scorecards.n_forecasts == 1

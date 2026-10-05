@@ -279,6 +279,7 @@ def build_forecast_snapshot(
         calibration_version=calibration.version if calibration else UNCALIBRATED_VERSION,
         calibration=calibration,
         uncalibrated_baseline=_plain(state.quant_baseline_uncalibrated or quant),
+        source=state.forecast_source,
     )
 
 

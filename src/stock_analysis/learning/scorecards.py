@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from typing import Optional
 
@@ -33,6 +33,7 @@ from stock_analysis.schemas.scorecard import (
     Scorecards,
     ScoredForecast,
 )
+from stock_analysis.schemas.snapshot import FORECAST_SOURCES
 
 ANALYSTS = ("technical", "fundamental", "sentiment", "context")
 _Z95 = 1.96
@@ -137,6 +138,12 @@ def independent_forecasts(
         else:
             kept.append(f)
     return kept[::-1], excluded
+
+
+def source_counts(forecasts: Sequence[ScoredForecast]) -> dict[str, int]:
+    """How many of ``forecasts`` are live and how many backtest (sources with none left out)."""
+    counts = Counter(f.source for f in forecasts)
+    return {s: counts[s] for s in FORECAST_SOURCES if counts[s]}
 
 
 # Two-sided 95% Student-t critical values for 1..30 degrees of freedom
@@ -263,6 +270,7 @@ def build_scorecards(
         ticker=ticker,
         n_forecasts=len(forecasts),
         overlapping_excluded=len(excluded),
+        sources=source_counts(forecasts),
         min_samples=settings.min_samples_analyst_weights,
         analysts=analyst_scorecards(forecasts, settings),
         by_regime=group_scores(forecasts, lambda f: f.market_regime),

@@ -27,7 +27,8 @@ from stock_analysis.learning.scorecards import hit_rate, independent_forecasts, 
 from stock_analysis.logging import get_logger
 from stock_analysis.review import metrics
 from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeStatus
-from stock_analysis.schemas.snapshot import ForecastSnapshot
+from stock_analysis.schemas.scorecard import ScoredForecast
+from stock_analysis.schemas.snapshot import FORECAST_SOURCES, ForecastSnapshot, ForecastSource
 from stock_analysis.schemas.track_record import (
     PROBABILISTIC_VARIANTS,
     VARIANTS,
@@ -125,6 +126,8 @@ def evaluate_forecast(snapshot: ForecastSnapshot, outcome: ForecastOutcome) -> E
         calibration_value_added=(uncal - cal) if uncal is not None and cal is not None else None,
         adjusted=snapshot.final_forecast.adjustment_applied,
         calibrated=snapshot.calibration is not None,
+        source=snapshot.effective_source,
+        source_inferred=snapshot.source_inferred,
         variants=variants,
     )
 
@@ -139,6 +142,12 @@ def load_evaluated_forecasts(
     """Independent scored original forecasts known at ``as_of`` (oldest first) and the
     IDs left out because their windows overlap a later forecast of the same ticker."""
     kept, excluded = independent_forecasts(outcomes.scored_forecasts(before=as_of, ticker=ticker))
+    return _evaluate(snapshots, outcomes, kept), excluded
+
+
+def _evaluate(
+    snapshots: ForecastSnapshotStore, outcomes: OutcomeStore, kept: Sequence[ScoredForecast]
+) -> list[EvaluatedForecast]:
     evaluated = []
     for f in kept:
         snapshot, outcome = snapshots.get(f.forecast_id), outcomes.get(f.forecast_id)
@@ -146,7 +155,7 @@ def load_evaluated_forecasts(
             logger.warning("evaluation_record_missing", forecast_id=f.forecast_id)
             continue
         evaluated.append(evaluate_forecast(snapshot, outcome))
-    return evaluated, excluded
+    return evaluated
 
 
 # --- Probability calibration (Plan.md §27) -------------------------------------------
@@ -382,16 +391,24 @@ def build_track_record(
     *,
     as_of: datetime,
     ticker: Optional[str] = None,
+    source: Optional[ForecastSource] = None,
     overlapping_excluded: int = 0,
     settings: Optional[Settings] = None,
 ) -> ForecastTrackRecord:
-    """Plan.md §28 rolling 8-week, 26-week and all-time windows."""
+    """Plan.md §28 rolling 8-week, 26-week and all-time windows.
+
+    With ``source`` only that source's forecasts are included.
+    """
     settings = settings or get_settings()
     minimum = settings.min_samples_decision_evaluation
+    if source is not None:
+        forecasts = [f for f in forecasts if f.source == source]
     return ForecastTrackRecord(
         as_of=as_of,
         ticker=ticker,
+        source=source,
         n_forecasts=len(forecasts),
+        n_inferred_source=sum(f.source_inferred for f in forecasts),
         overlapping_excluded=overlapping_excluded,
         min_samples=minimum,
         windows=[
@@ -409,19 +426,51 @@ def build_evaluation(
     ticker: Optional[str] = None,
     settings: Optional[Settings] = None,
 ) -> EvaluationReport:
-    """Track record and probability calibration from the records that existed at ``as_of``."""
+    """Track records (one per source) and probability calibration from the records that
+    existed at ``as_of``.
+
+    Probability calibration pools the sources, so overlaps are dropped across them;
+    each track record drops overlaps within its own source.
+    """
     settings = settings or get_settings()
-    forecasts, excluded = load_evaluated_forecasts(snapshots, outcomes, as_of=as_of, ticker=ticker)
-    return EvaluationReport(
-        track_record=build_track_record(
-            forecasts,
+    scored = outcomes.scored_forecasts(before=as_of, ticker=ticker)
+    kept, excluded = independent_forecasts(scored)
+    # Each source's record drops overlaps within that source only: a live forecast
+    # is not left out because a later backtest week overlaps it
+    by_source = {
+        s: independent_forecasts([f for f in scored if f.source == s]) for s in FORECAST_SOURCES
+    }
+    needed = {f.forecast_id: f for f in kept}
+    for own, _ in by_source.values():
+        needed.update((f.forecast_id, f) for f in own)
+    evaluated = {e.forecast_id: e for e in _evaluate(snapshots, outcomes, list(needed.values()))}
+
+    def known(items: Sequence[ScoredForecast]) -> list[EvaluatedForecast]:
+        return [evaluated[f.forecast_id] for f in items if f.forecast_id in evaluated]
+
+    forecasts = known(kept)
+    records = [
+        build_track_record(
+            known(own),
             as_of=as_of,
             ticker=ticker,
-            overlapping_excluded=len(excluded),
+            source=source,
+            overlapping_excluded=len(own_excluded),
             settings=settings,
-        ),
+        )
+        for source, (own, own_excluded) in by_source.items()
+        if own
+    ] or [
+        build_track_record(
+            [], as_of=as_of, ticker=ticker, overlapping_excluded=len(excluded), settings=settings
+        )
+    ]
+    sources = {s: sum(f.source == s for f in forecasts) for s in FORECAST_SOURCES}
+    return EvaluationReport(
+        track_records=records,
         probability_calibration=[
             probability_calibration(forecasts, v, settings=settings) for v in PROBABILISTIC_VARIANTS
         ],
         n_buckets=settings.probability_calibration_buckets,
+        sources={s: n for s, n in sources.items() if n},
     )

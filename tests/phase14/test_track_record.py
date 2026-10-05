@@ -274,7 +274,7 @@ def _later(snaps):
 class TestBuildEvaluation:
     def test_from_stored_history(self, history, store, outcome_store):
         report = build_evaluation(store, outcome_store, as_of=_later(history))
-        record = report.track_record
+        record = report.track_records[0]
         assert record.n_forecasts == 3
         all_time = record.windows[2]
         assert all_time.n == 3
@@ -291,7 +291,7 @@ class TestBuildEvaluation:
 
     def test_counts_calibrated_forecasts(self, history, store, outcome_store):
         report = build_evaluation(store, outcome_store, as_of=_later(history))
-        window = report.track_record.windows[2]
+        window = report.track_records[0].windows[2]
         assert window.n_calibrated == 2
 
     def test_point_in_time(self, history, store, outcome_store):
@@ -299,17 +299,17 @@ class TestBuildEvaluation:
             history[-1].target_date, time(9, 0), tzinfo=UTC
         )  # the last week has not been scored yet
         report = build_evaluation(store, outcome_store, as_of=before_last)
-        assert report.track_record.n_forecasts == 2
+        assert report.track_records[0].n_forecasts == 2
 
     def test_overlapping_forecasts_count_once(self, history, adjusted_state, store, outcome_store):
         overlap = snapshot_as_of(adjusted_state, week(0) + timedelta(days=2))
         save_scored(store, outcome_store, overlap, 3.0, amplitude=0.6)
-        record = build_evaluation(store, outcome_store, as_of=_later(history)).track_record
+        record = build_evaluation(store, outcome_store, as_of=_later(history)).track_records[0]
         assert (record.n_forecasts, record.overlapping_excluded) == (3, 1)
 
     def test_ticker_filter(self, history, store, outcome_store):
         report = build_evaluation(store, outcome_store, as_of=_later(history), ticker="TCS")
-        assert report.track_record.n_forecasts == 0
+        assert report.track_records[0].n_forecasts == 0
 
 
 class TestCli:

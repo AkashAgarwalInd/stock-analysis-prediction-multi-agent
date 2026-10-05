@@ -46,7 +46,7 @@ from stock_analysis.learning import (
     build_evaluation,
     render_calibration_history,
     render_probability_calibration,
-    render_track_record,
+    render_track_records,
 )
 from stock_analysis.llm.usage import LLMUsageSummary
 from stock_analysis.logging import get_logger
@@ -144,15 +144,20 @@ def _evaluation_reports(db: Database, ticker: str, as_of: datetime) -> tuple[str
     final = [c for c in report.probability_calibration if c.variant == "final"]
     evaluate = "\n\n".join(
         (
-            render_track_record(report.track_record),
-            render_probability_calibration(final, n_buckets=report.n_buckets, ticker=ticker),
+            render_track_records(report),
+            render_probability_calibration(
+                final, n_buckets=report.n_buckets, ticker=ticker, sources=report.sources
+            ),
         )
     )
     calibration = "\n\n".join(
         (
             render_calibration_history(ticker, LearningStore(db).calibration_history(ticker)),
             render_probability_calibration(
-                report.probability_calibration, n_buckets=report.n_buckets, ticker=ticker
+                report.probability_calibration,
+                n_buckets=report.n_buckets,
+                ticker=ticker,
+                sources=report.sources,
             ),
         )
     )

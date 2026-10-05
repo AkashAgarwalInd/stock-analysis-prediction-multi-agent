@@ -173,18 +173,24 @@ def _shadow_values(snapshot: ForecastSnapshot) -> Optional[tuple[Any, ...]]:
 
 
 def _storage_hash(
-    row: tuple[Any, ...], decisions: Rows, daily: Rows, shadow: Optional[tuple[Any, ...]] = None
+    row: tuple[Any, ...],
+    decisions: Rows,
+    daily: Rows,
+    shadow: Optional[tuple[Any, ...]] = None,
+    source: Optional[str] = None,
 ) -> str:
     """SHA-256 over the exact values written to the snapshot tables.
 
     Hashing stored values (rather than a re-serialised model) keeps old
     snapshots verifiable even if model serialisation changes in a later release.
-    The shadow-forecast row is included only when present, so snapshots stored
-    before shadow forecasts existed still verify.
+    The shadow-forecast row and the source are included only when present, so
+    snapshots stored before either existed still verify.
     """
-    payload = [list(row), [list(d) for d in decisions], [list(p) for p in daily]]
+    payload: list[Any] = [list(row), [list(d) for d in decisions], [list(p) for p in daily]]
     if shadow is not None:
         payload.append(list(shadow))
+    if source is not None:
+        payload.append({"source": source})
     return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
@@ -219,6 +225,12 @@ class ForecastSnapshotStore:
         if missing:
             raise ForecastSnapshotError(
                 f"Forecast snapshot tables are missing ({', '.join(missing)}); "
+                "run `stock-analysis migrate` (alembic upgrade head)"
+            )
+        columns = self.db.fetchall("PRAGMA table_info(forecast_snapshots)")
+        if "source" not in {c["name"] for c in columns}:
+            raise ForecastSnapshotError(
+                "forecast_snapshots has no source column; "
                 "run `stock-analysis migrate` (alembic upgrade head)"
             )
 
@@ -280,13 +292,15 @@ class ForecastSnapshotStore:
         decisions = _decision_values(snapshot)
         daily = _daily_values(snapshot)
         shadow = _shadow_values(snapshot)
-        digest = _storage_hash(row, decisions, daily, shadow)
+        digest = _storage_hash(row, decisions, daily, shadow, snapshot.source)
         fid = snapshot.forecast_id
         try:
             with self.db.transaction() as conn:
                 conn.execute(
-                    _insert_sql("forecast_snapshots", (*_SNAPSHOT_COLUMNS, "snapshot_hash")),
-                    (*row, digest),
+                    _insert_sql(
+                        "forecast_snapshots", (*_SNAPSHOT_COLUMNS, "source", "snapshot_hash")
+                    ),
+                    (*row, snapshot.source, digest),
                 )
                 conn.executemany(
                     _insert_sql("forecast_decisions", ("forecast_id", *_DECISION_COLUMNS)),
@@ -314,6 +328,7 @@ class ForecastSnapshotStore:
             forecast_id=snapshot.forecast_id,
             ticker=snapshot.ticker,
             version=snapshot.version,
+            source=snapshot.source,
             data_snapshot_id=snapshot.data_snapshot_id,
         )
 
@@ -321,7 +336,8 @@ class ForecastSnapshotStore:
         """Load one snapshot version, verifying its integrity hash."""
         with self._lock:
             row = self.db.fetchone(
-                f"SELECT {', '.join(_SNAPSHOT_COLUMNS)}, snapshot_hash FROM forecast_snapshots "
+                f"SELECT {', '.join(_SNAPSHOT_COLUMNS)}, source, snapshot_hash "
+                "FROM forecast_snapshots "
                 "WHERE forecast_id = ?",
                 (forecast_id,),
             )
@@ -435,6 +451,7 @@ class ForecastSnapshotStore:
             [tuple(d) for d in decisions],
             [tuple(p) for p in daily],
             tuple(shadow) if shadow is not None else None,
+            row["source"],
         )
         if stored != row["snapshot_hash"]:
             raise SnapshotIntegrityError(f"Snapshot {forecast_id} does not match its stored hash")
@@ -492,5 +509,6 @@ class ForecastSnapshotStore:
                 "uncalibrated_baseline": (
                     json.loads(shadow["uncalibrated_baseline_json"]) if shadow is not None else None
                 ),
+                "source": row["source"],
             }
         )

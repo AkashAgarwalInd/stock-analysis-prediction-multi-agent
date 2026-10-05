@@ -34,7 +34,7 @@ from stock_analysis.learning import (
     render_postmortem,
     render_probability_calibration,
     render_scorecards,
-    render_track_record,
+    render_track_records,
 )
 from stock_analysis.llm.usage import LLMCallRecord, LLMUsageSummary
 from stock_analysis.logging import configure_logging, get_logger
@@ -142,7 +142,7 @@ def review(
         if state.scorecards is not None:
             console.print(render_scorecards(state.scorecards), markup=False)
         if state.evaluation is not None:
-            console.print(render_track_record(state.evaluation.track_record), markup=False)
+            console.print(render_track_records(state.evaluation), markup=False)
         for error in state.errors:
             console.print(f"Review error: {error}", markup=False)
         if llm and state.llm_usage is not None:
@@ -215,10 +215,12 @@ def evaluate(
         report = build_evaluation(
             ForecastSnapshotStore(db), OutcomeStore(db), as_of=datetime.now(UTC), ticker=base
         )
-        console.print(render_track_record(report.track_record), markup=False)
+        console.print(render_track_records(report), markup=False)
         final = [c for c in report.probability_calibration if c.variant == "final"]
         console.print(
-            render_probability_calibration(final, n_buckets=report.n_buckets, ticker=base),
+            render_probability_calibration(
+                final, n_buckets=report.n_buckets, ticker=base, sources=report.sources
+            ),
             markup=False,
         )
 
@@ -243,7 +245,10 @@ def calibration(
         )
         console.print(
             render_probability_calibration(
-                report.probability_calibration, n_buckets=report.n_buckets, ticker=base
+                report.probability_calibration,
+                n_buckets=report.n_buckets,
+                ticker=base,
+                sources=report.sources,
             ),
             markup=False,
         )
@@ -387,9 +392,18 @@ def history(
             console.print(f"No stored forecasts for {base}.", markup=False)
             return
         outcomes = OutcomeStore(db)
-        table = Table(title=f"Forecast history: {base}")
+        inferred = any(s.source_inferred for s in snapshots)
+        table = Table(
+            title=f"Forecast history: {base}",
+            caption=(
+                "* source inferred: stored before forecasts recorded whether they were live "
+                "or a backtest week"
+                if inferred
+                else None
+            ),
+        )
         for column in (
-            "As of", "Target", "Cal.", "P10–P90", "P50", "P(up)", "Adj.",
+            "As of", "Target", "Source", "Cal.", "P10–P90", "P50", "P(up)", "Adj.",
             "Actual", "Return", "Band", "Direction", "Status",
         ):  # fmt: skip
             table.add_column(column)
@@ -398,6 +412,7 @@ def history(
             table.add_row(
                 snap.as_of_date.isoformat(),
                 snap.target_date.isoformat(),
+                snap.effective_source + ("*" if snap.source_inferred else ""),
                 f"v{snap.calibration_version}",
                 f"{f.p10_price:.2f}–{f.p90_price:.2f}",
                 f"{f.p50_price:.2f}",

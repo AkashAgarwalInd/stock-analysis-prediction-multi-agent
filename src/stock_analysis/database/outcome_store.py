@@ -16,7 +16,7 @@ from stock_analysis.database.database import Database
 from stock_analysis.logging import get_logger
 from stock_analysis.schemas.outcome import ForecastOutcome, OutcomeDaily, OutcomeStatus
 from stock_analysis.schemas.scorecard import ScoredForecast
-from stock_analysis.schemas.snapshot import canonical_json
+from stock_analysis.schemas.snapshot import canonical_json, resolve_forecast_source
 
 logger = get_logger(__name__)
 
@@ -145,7 +145,8 @@ class OutcomeStore:
             *((ticker,) if ticker else ()),
         )
         rows = self.db.fetchall(
-            "SELECT o.forecast_id, s.ticker, s.market_regime, s.data_inputs_json, s.as_of_date, "
+            "SELECT o.forecast_id, s.ticker, s.market_regime, s.data_inputs_json, s.source, "
+            "s.as_of_date, "
             "s.target_date, o.evaluated_at, o.direction_correct, o.in_80pct_band, "
             "o.signed_error_pct, o.abs_error_pct, o.brier, o.analyst_hits "
             "FROM forecast_outcomes o JOIN forecast_snapshots s ON s.forecast_id = o.forecast_id "
@@ -156,7 +157,9 @@ class OutcomeStore:
         )
         out = []
         for r in rows:
-            sector = (json.loads(r["data_inputs_json"]).get("fundamentals") or {}).get("sector")
+            data_inputs = json.loads(r["data_inputs_json"])
+            sector = (data_inputs.get("fundamentals") or {}).get("sector")
+            source, inferred = resolve_forecast_source(r["source"], data_inputs)
             out.append(
                 ScoredForecast(
                     forecast_id=r["forecast_id"],
@@ -172,6 +175,8 @@ class OutcomeStore:
                     abs_error_pct=r["abs_error_pct"],
                     brier=r["brier"],
                     analyst_hits=json.loads(r["analyst_hits"]) if r["analyst_hits"] else {},
+                    source=source,
+                    source_inferred=inferred,
                 )
             )
         return out

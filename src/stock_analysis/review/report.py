@@ -54,7 +54,8 @@ def render_last_forecast_vs_actual(snapshot: ForecastSnapshot, outcome: Forecast
         "",
         f"- Forecast `{snapshot.forecast_id}` for {snapshot.ticker}, made "
         f"{snapshot.made_at.date().isoformat()} (as of {snapshot.as_of_date.isoformat()}), "
-        f"target {snapshot.target_date.isoformat()}",
+        f"target {snapshot.target_date.isoformat()}"
+        + ("; a simulated backtest week" if snapshot.effective_source == "backtest" else ""),
     ]
     if outcome.status != OutcomeStatus.SCORED:
         label = "Not evaluated" if outcome.status == OutcomeStatus.INVALID else "Not yet evaluated"

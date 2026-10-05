@@ -12,14 +12,17 @@ from stock_analysis.schemas.learning import (
     PostMortem,
 )
 from stock_analysis.schemas.scorecard import GroupScore, HitRate, Scorecards
+from stock_analysis.schemas.snapshot import FORECAST_SOURCE_LABELS
 from stock_analysis.schemas.track_record import (
     VARIANT_LABELS,
+    EvaluationReport,
     ForecastTrackRecord,
     MeanEffect,
     ProbabilityCalibration,
     ReliabilityTable,
     TrackRecordWindow,
 )
+from stock_analysis.snapshots.report import SIMULATED_NOTE, source_breakdown
 
 
 def render_postmortem(postmortem: PostMortem) -> str:
@@ -133,6 +136,12 @@ def _group_table(title: str, scores: list[GroupScore]) -> list[str]:
     return [*lines, ""]
 
 
+def _pooled_sources_line(sources: dict[str, int]) -> list[str]:
+    if not sources.get("backtest"):
+        return []
+    return [f"- Sources pooled here: {source_breakdown(sources)}"]
+
+
 def render_scorecards(cards: Scorecards) -> str:
     """Plan.md §24-25 scorecards plus the decision evaluation, as markdown."""
     scope = f" for {cards.ticker}" if cards.ticker else ""
@@ -149,6 +158,7 @@ def render_scorecards(cards: Scorecards) -> str:
     ]
     if not cards.n_forecasts:
         return "\n".join([*lines, "- No scored forecasts yet.", ""])
+    lines += _pooled_sources_line(cards.sources)
     lines += [
         f"- Small samples are noisy: findings need at least {cards.min_samples} forecasts, and "
         "intervals show how uncertain each rate is.",
@@ -271,6 +281,8 @@ def _window(window: TrackRecordWindow) -> list[str]:
 def render_track_record(record: ForecastTrackRecord) -> str:
     """Plan.md §28 / §31 forecast track record with the §53 benchmarks, as markdown."""
     scope = f" for {record.ticker}" if record.ticker else ""
+    if record.source is not None:
+        scope += f": {FORECAST_SOURCE_LABELS[record.source].lower()} forecasts"
     lines = [
         f"## Forecast track record{scope} (as of {record.as_of:%Y-%m-%d %H:%M %Z})",
         "",
@@ -284,6 +296,13 @@ def render_track_record(record: ForecastTrackRecord) -> str:
     ]
     if not record.n_forecasts:
         return "\n".join([*lines, "- No scored forecasts yet.", ""])
+    if record.source == "backtest":
+        lines.append(f"- {SIMULATED_NOTE}")
+    if record.n_inferred_source:
+        lines.append(
+            f"- {record.n_inferred_source} of these were stored before forecasts recorded their "
+            "source; it was inferred from the backtest's disabled-analyst reasons."
+        )
     lines += [
         "- Naive flat predicts no change (P50 = last close, direction flat); it states no "
         "probabilities or range. Brier and pinball: lower is better. Sharpness is the "
@@ -296,6 +315,11 @@ def render_track_record(record: ForecastTrackRecord) -> str:
     for window in record.windows:
         lines += _window(window)
     return "\n".join(lines)
+
+
+def render_track_records(report: EvaluationReport) -> str:
+    """The evaluation's track records, one section per forecast source."""
+    return "\n".join(render_track_record(r) for r in report.track_records)
 
 
 def _decomposition(table: ReliabilityTable) -> str:
@@ -328,7 +352,11 @@ def _reliability_rows(table: ReliabilityTable) -> list[str]:
 
 
 def render_probability_calibration(
-    calibrations: list[ProbabilityCalibration], *, n_buckets: int, ticker: Optional[str] = None
+    calibrations: list[ProbabilityCalibration],
+    *,
+    n_buckets: int,
+    ticker: Optional[str] = None,
+    sources: Optional[dict[str, int]] = None,
 ) -> str:
     """Plan.md §27 / §55: predicted probability vs observed frequency.
 
@@ -340,6 +368,7 @@ def render_probability_calibration(
     lines = [f"## Probability calibration{scope}", "", f"- Evaluated forecasts: {n}"]
     if not n:
         return "\n".join([*lines, "- No scored forecasts yet.", ""])
+    lines += _pooled_sources_line(sources or {})
     lines += [
         f"- Each predicted probability is put in one of {n_buckets} equal buckets and compared "
         "with how often that outcome happened. A negative gap means the event happened less "

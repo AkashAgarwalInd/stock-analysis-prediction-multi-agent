@@ -8,7 +8,7 @@ from stock_analysis.backtest.runner import BacktestResult
 from stock_analysis.learning.report import (
     render_probability_calibration,
     render_scorecards,
-    render_track_record,
+    render_track_records,
 )
 from stock_analysis.snapshots.report import DISCLAIMER
 
@@ -103,10 +103,10 @@ def render_backtest_report(result: BacktestResult) -> str:
     final = [c for c in evaluation.probability_calibration if c.variant == "final"]
     lines += [
         "",
-        render_track_record(evaluation.track_record).rstrip(),
+        render_track_records(evaluation).rstrip(),
         "",
         render_probability_calibration(
-            final, n_buckets=evaluation.n_buckets, ticker=result.ticker
+            final, n_buckets=evaluation.n_buckets, ticker=result.ticker, sources=evaluation.sources
         ).rstrip(),
         "",
         render_scorecards(result.scorecards).rstrip(),

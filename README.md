@@ -55,6 +55,14 @@ works on a fresh app database. To run another one later, pass `--database
 data/backtests/<name>.db` to `backtest` and the same `--database` to the other commands; the
 error message suggests a path.
 
+Every stored forecast records whether it is **live** or a **backtest** (simulated) week. Since
+the backtest and live forecasts can share a database, `evaluate`, the `analyze` report and the
+predictor's prior context show a separate track record per source, and backtest results carry a
+note that an LLM may know how those past weeks went. Calibration, lessons, scorecards and the
+probability-calibration tables still learn from both (the backtest exists to seed them) and
+list the counts per source. `history` has a Source column; forecasts stored before sources were
+recorded (migration 007) are inferred from the backtest's disabled-analyst reasons and marked `*`.
+
 The demo runs the same flow on three stocks, each in its own database under
 `data/demo/<time>/<TICKER>/`, checks that every analysis report shows the 15 items of §76 and
 prints a summary.
@@ -73,8 +81,8 @@ ships. `--no-llm` skips the LLM entirely.
 | `analyze QUERY [--database P] [--no-llm] [--no-review] [-o report.md]` | Live forecast for a ticker or company name (`"tata motors"`) |
 | `backtest --ticker T --weeks N [--end D] [--no-llm] [--database P] [-o F]` | Weekly forecasts simulated point-in-time, each scored and learned from in order (default: into the app database) |
 | `review [--ticker T \| --all] [--no-llm]` | Score matured forecasts, write postmortems, update lessons and calibration |
-| `history --ticker T [--database P]` | Stored forecasts with their outcomes |
-| `evaluate [--ticker T] [--database P]` | Track record (8/26 weeks, all time) against the benchmarks, plus reliability |
+| `history --ticker T [--database P]` | Stored forecasts (live or backtest) with their outcomes |
+| `evaluate [--ticker T] [--database P]` | Track record (8/26 weeks, all time) against the benchmarks, per source (live / backtest), plus reliability |
 | `calibration [--ticker T] [--database P]` | Calibration versions and predicted-vs-observed probability tables |
 | `scorecard [--ticker T] [--database P]` | Analyst hit rates, quality by regime, decision-engine evaluation |
 | `usage [--ticker T] [--days N] [--database P]` | LLM calls, tokens and estimated cost from the call log |

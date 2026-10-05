@@ -16,6 +16,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from stock_analysis.schemas.outcome import Direction
 from stock_analysis.schemas.scorecard import HitRate
+from stock_analysis.schemas.snapshot import ForecastSource
 
 # Plan.md §53 benchmarks, simplest first
 Variant = Literal["naive_flat", "quant_uncalibrated", "quant_calibrated", "final"]
@@ -75,6 +76,10 @@ class EvaluatedForecast(BaseModel):
     calibration_value_added: Optional[float] = None
     adjusted: bool = Field(default=False, description="The LLM changed the quant baseline")
     calibrated: bool = Field(default=False, description="A calibration version was applied")
+    source: ForecastSource = "live"
+    source_inferred: bool = Field(
+        default=False, description="Stored before sources were recorded; source inferred"
+    )
     variants: dict[str, VariantScore]
 
 
@@ -182,23 +187,48 @@ class TrackRecordWindow(BaseModel):
 
 
 class ForecastTrackRecord(BaseModel):
-    """Plan.md §28 / §31: rolling 8-week, 26-week and all-time records as of ``as_of``."""
+    """Plan.md §28 / §31: rolling 8-week, 26-week and all-time records as of ``as_of``.
+
+    The evaluation keeps one record per source: simulated backtest weeks are
+    never pooled with live forecasts (an LLM may know how those past weeks went).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     as_of: AwareDatetime
     ticker: Optional[str] = None
+    source: Optional[ForecastSource] = Field(
+        default=None, description="None: built from forecasts of any source"
+    )
     n_forecasts: int
+    n_inferred_source: int = Field(
+        default=0, description="Forecasts stored before sources were recorded (source inferred)"
+    )
     overlapping_excluded: int = 0
     min_samples: int
     windows: list[TrackRecordWindow]
 
 
 class EvaluationReport(BaseModel):
-    """Track record plus probability calibration of every probabilistic variant."""
+    """Track records plus probability calibration of every probabilistic variant.
+
+    ``track_records`` holds one record per source with scored forecasts (live
+    first), or a single empty record when nothing is scored. Probability
+    calibration pools both sources; ``sources`` gives the counts behind it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    track_record: ForecastTrackRecord
+    track_records: list[ForecastTrackRecord] = Field(min_length=1)
     probability_calibration: list[ProbabilityCalibration]
     n_buckets: int
+    sources: dict[str, int] = Field(default_factory=dict)
+
+    @property
+    def n_forecasts(self) -> int:
+        """Independent scored forecasts over all sources."""
+        return sum(r.n_forecasts for r in self.track_records)
+
+    def record_for(self, source: ForecastSource) -> Optional[ForecastTrackRecord]:
+        """The record of ``source``, if any of its forecasts are scored."""
+        return next((r for r in self.track_records if r.source == source), None)

@@ -9,7 +9,7 @@ README.
 uv sync --dev
 cp .env.example .env        # GEMINI_API_KEY is optional; without it the quant baseline ships
 stock-agents init           # creates DATABASE_PATH and applies every migration
-stock-agents migrate        # after pulling new migrations (e.g. 006 adds llm_calls)
+stock-agents migrate        # after pulling new migrations (e.g. 006 adds llm_calls, 007 the forecast source)
 ```
 
 Backtest databases are migrated automatically when a backtest creates or extends them.
@@ -107,6 +107,7 @@ the previous close as a zero-volume bar on a holiday; such bars are dropped.
 | Symptom | Cause / fix |
 |---|---|
 | `Warning: GEMINI_API_KEY is not set` | The analysts degrade and the quant baseline ships. Set the key or use `--no-llm`. |
+| `forecast_snapshots has no source column; run stock-analysis migrate` | The database predates migration 007 (live vs backtest labels): run `stock-agents migrate`; existing forecasts keep no stored source and are inferred when read |
 | `… tables are missing; run stock-analysis migrate` | The database predates a migration: run `stock-agents migrate` (or `alembic upgrade head`) |
 | Many `external_call_retrying` warnings for yfinance | Yahoo is throttling: lower `YFINANCE_REQUESTS_PER_MINUTE` |
 | `LLM call budget of N calls for this run is spent` | Raise `LLM_MAX_CALLS_PER_RUN`, or check for a revision loop (`MAX_REVISIONS`) |

@@ -191,7 +191,7 @@ class TestBacktestRun:
         assert "## Forecast track record for RELIANCE" in text
         assert "| Naive flat |" in text
         assert "## Probability calibration for RELIANCE" in text
-        assert result.evaluation.track_record.n_forecasts == WEEKS
+        assert result.evaluation.track_records[0].n_forecasts == WEEKS
 
     def test_report_cells_cannot_break_the_table(self, swing_run):
         result, _, _ = swing_run

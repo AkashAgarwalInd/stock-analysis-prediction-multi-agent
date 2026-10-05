@@ -15,7 +15,7 @@ from typing import Literal, Optional
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from stock_analysis.schemas.scorecard import GroupScore, HitRate
-from stock_analysis.schemas.snapshot import ForecastSnapshot
+from stock_analysis.schemas.snapshot import ForecastSnapshot, ForecastSource
 
 # Plan.md §20: discrete event lessons (e.g. earnings) activate after fewer confirmations.
 EVENT_LESSON_CATEGORIES = frozenset({"earnings", "earnings_or_corporate_event", "corporate_event"})
@@ -180,7 +180,11 @@ class OutcomeMetrics(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    source: Optional[ForecastSource] = Field(
+        default=None, description="None: stored before records were kept per source (pooled)"
+    )
     n_forecasts: int = Field(ge=0, description="Independent scored forecasts")
+    n_inferred_source: int = Field(default=0, ge=0, description="Of which the source was inferred")
     min_samples: int = Field(ge=1, description="Below this no variant is called better")
     windows: list[WindowMetrics] = Field(default_factory=list)
 
@@ -201,9 +205,11 @@ class OutcomeMetrics(BaseModel):
 class TrackRecord(BaseModel):
     """What is known about this ticker's past forecasts.
 
-    Counts come from the stored records; ``outcome_metrics`` (Plan.md §28) is
-    copied from the point-in-time track record and is ``None`` when it was not
-    loaded (no outcome store) or nothing has been scored yet.
+    Counts come from the stored records; ``outcome_metrics_by_source`` (Plan.md
+    §28) is copied from the point-in-time track records, one per forecast source
+    (live first), and is empty when it was not loaded (no outcome store) or
+    nothing has been scored yet. ``outcome_metrics`` is the single pooled record
+    of contexts stored before sources were kept apart; new runs leave it ``None``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -215,6 +221,13 @@ class TrackRecord(BaseModel):
         ge=0, description="Target date passed, not yet evaluated"
     )
     outcome_metrics: Optional[OutcomeMetrics] = None
+    outcome_metrics_by_source: list[OutcomeMetrics] = Field(default_factory=list)
+
+    def metric_groups(self) -> list[OutcomeMetrics]:
+        """The per-source records, or the pooled record of an older context."""
+        if self.outcome_metrics_by_source:
+            return list(self.outcome_metrics_by_source)
+        return [self.outcome_metrics] if self.outcome_metrics is not None else []
 
 
 class LessonNote(BaseModel):
@@ -243,6 +256,10 @@ class LastReview(BaseModel):
     target_date: date
     evaluated_at: AwareDatetime
     status: Literal["scored", "invalid"]
+    source: Optional[ForecastSource] = Field(
+        default=None, description="None: stored before reviews recorded the source"
+    )
+    source_inferred: bool = False
     invalid_reason: Optional[str] = None
     last_close: float
     prob_up: float
@@ -315,6 +332,8 @@ class ScorecardSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     n_forecasts: int = Field(ge=0)
+    # Independent forecasts per source (live / backtest); the summary pools them
+    sources: dict[str, int] = Field(default_factory=dict)
     min_samples: int = Field(ge=1, description="MIN_SAMPLES_ANALYST_WEIGHTS")
     analysts: dict[str, HitRate] = Field(default_factory=dict)
     regimes: list[GroupScore] = Field(default_factory=list)

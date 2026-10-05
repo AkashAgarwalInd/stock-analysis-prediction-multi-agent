@@ -86,6 +86,8 @@ def load_last_review(
         forecast_id=outcome.forecast_id,
         as_of_date=snapshot.as_of_date,
         target_date=snapshot.target_date,
+        source=snapshot.effective_source,
+        source_inferred=snapshot.source_inferred,
         evaluated_at=outcome.evaluated_at,
         status="scored" if outcome.status == OutcomeStatus.SCORED else "invalid",
         invalid_reason=outcome.invalid_reason,
@@ -178,6 +180,7 @@ def summarize_scorecards(cards: Scorecards) -> ScorecardSummary:
     """The prompt-sized part of the scorecards: pooled analyst hit rates and regimes."""
     return ScorecardSummary(
         n_forecasts=cards.n_forecasts,
+        sources=cards.sources,
         min_samples=cards.min_samples,
         analysts={a.analyst: a.pooled for a in cards.analysts if a.pooled.n},
         regimes=cards.by_regime,
@@ -215,7 +218,11 @@ def summarize_track_record(record: ForecastTrackRecord) -> OutcomeMetrics:
             )
         )
     return OutcomeMetrics(
-        n_forecasts=record.n_forecasts, min_samples=record.min_samples, windows=windows
+        source=record.source,
+        n_forecasts=record.n_forecasts,
+        n_inferred_source=record.n_inferred_source,
+        min_samples=record.min_samples,
+        windows=windows,
     )
 
 
@@ -270,11 +277,10 @@ def add_learning_context(
                 evaluation = build_evaluation(
                     snapshot_store, outcome_store, as_of=as_of, ticker=ticker
                 )
-                if not evaluation.track_record.n_forecasts:
+                if not evaluation.n_forecasts:
                     return record
-                return record.model_copy(
-                    update={"outcome_metrics": summarize_track_record(evaluation.track_record)}
-                )
+                by_source = [summarize_track_record(r) for r in evaluation.track_records]
+                return record.model_copy(update={"outcome_metrics_by_source": by_source})
 
             attempt("track_record", metrics)
     if learning_store is not None:

@@ -16,6 +16,7 @@ from stock_analysis.schemas.analyst_reports import (
     MarketRegime,
     RiskCategory,
 )
+from stock_analysis.schemas.snapshot import ForecastSource
 
 __all__ = [
     "AdjustmentGateDecision",
@@ -52,6 +53,8 @@ class GraphState(BaseModel):
     # in a backtest. They get a deterministic placeholder report, no LLM call, and are
     # left out of guardrail coverage/consensus and the decision engine.
     disabled_analysts: dict[str, str] = Field(default_factory=dict)
+    # Recorded on the snapshot: "backtest" for a simulated week, "live" otherwise
+    forecast_source: ForecastSource = "live"
 
     # Collector outputs (references/IDs/summaries, not large data)
     technical_indicators_summary: Optional[dict] = None

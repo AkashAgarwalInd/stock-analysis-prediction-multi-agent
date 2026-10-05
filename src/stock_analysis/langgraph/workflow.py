@@ -45,11 +45,12 @@ from stock_analysis.schemas.memory import (
     ForecastInsight,
     LastReview,
     MemoryContext,
+    OutcomeMetrics,
     PreRunReview,
     ScorecardSummary,
     TrackRecord,
 )
-from stock_analysis.schemas.snapshot import PriceHistorySnapshot
+from stock_analysis.schemas.snapshot import FORECAST_SOURCE_LABELS, PriceHistorySnapshot
 from stock_analysis.snapshots import (
     SnapshotNotReadyError,
     build_forecast_snapshot,
@@ -507,7 +508,11 @@ def _hits(hits: int, n: int, rate: Optional[float]) -> str:
 
 
 def _review_lines(review: LastReview) -> list[str]:
-    head = f"  LAST REVIEW of the forecast as of {review.as_of_date} for {review.target_date}:"
+    simulated = " (a simulated backtest week)" if review.source == "backtest" else ""
+    head = (
+        f"  LAST REVIEW of the forecast as of {review.as_of_date} for {review.target_date}"
+        f"{simulated}:"
+    )
     if review.status != "scored":
         return [f"{head} could not be evaluated ({review.invalid_reason})."]
     band = "inside" if review.in_80pct_band else "OUTSIDE"
@@ -578,9 +583,30 @@ def _track_record_lines(track: TrackRecord) -> list[str]:
         f"scored against actual prices {track.forecasts_scored}; "
         f"awaiting evaluation {track.forecasts_awaiting_outcome}."
     ]
-    metrics = track.outcome_metrics
-    if metrics is None:
-        return lines
+    groups = track.metric_groups()
+    for metrics in groups:
+        indent = "    "
+        if metrics.source is not None:
+            lines.append(
+                f"    {FORECAST_SOURCE_LABELS[metrics.source]} forecasts:"
+                + (
+                    " simulated past weeks; you may know how they went, so their LLM value "
+                    "added may be optimistic."
+                    if metrics.source == "backtest"
+                    else ""
+                )
+            )
+            indent = "      "
+        lines += _window_lines(metrics, indent)
+    if groups:
+        lines.append(
+            f"    Fewer than {groups[0].min_samples} scored forecasts is anecdotal, not a finding."
+        )
+    return lines
+
+
+def _window_lines(metrics: OutcomeMetrics, indent: str) -> list[str]:
+    lines = []
     for label, w in metrics.distinct_windows():
         coverage = "n/a" if w.coverage_80pct is None else f"{w.coverage_80pct:.0%}"
         brier = "n/a" if w.brier is None else f"{w.brier:.3f}"
@@ -591,22 +617,24 @@ def _track_record_lines(track: TrackRecord) -> list[str]:
             else "no forecast adjusted by the LLM"
         )
         lines.append(
-            f"    {label}: {w.n} forecasts; direction "
+            f"{indent}{label}: {w.n} forecasts; direction "
             f"{_hits(w.direction.hits, w.direction.n, w.direction.rate)}; P10-P90 coverage "
             f"{coverage} (target 80%); Brier {brier}; mean abs error {mae}; mean signed error "
             f"{_signed(w.mean_signed_error_pct)}; {llm}."
         )
-    lines.append(
-        f"    Fewer than {metrics.min_samples} scored forecasts is anecdotal, not a finding."
-    )
     return lines
 
 
 def _scorecard_lines(cards: ScorecardSummary, regime: Optional[str]) -> list[str]:
     if not cards.n_forecasts:
         return []
+    pooled = (
+        f" ({cards.sources.get('live', 0)} live, {cards.sources['backtest']} backtest, pooled)"
+        if cards.sources.get("backtest")
+        else ""
+    )
     lines = [
-        f"  SCORECARDS ({cards.n_forecasts} independent scored forecasts; fewer than "
+        f"  SCORECARDS ({cards.n_forecasts} independent scored forecasts{pooled}; fewer than "
         f"{cards.min_samples} is anecdotal):"
     ]
     if cards.analysts:

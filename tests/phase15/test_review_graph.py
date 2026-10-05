@@ -131,8 +131,8 @@ class TestReviewGraph:
         assert state.benchmarks["RELIANCE"].n == 2
         # scorecards and track record cover the newly scored forecasts
         assert state.scorecards.n_forecasts == 2
-        assert state.evaluation.track_record.n_forecasts == 2
-        all_time = state.evaluation.track_record.windows[-1]
+        assert state.evaluation.track_records[0].n_forecasts == 2
+        all_time = state.evaluation.track_records[0].windows[-1]
         assert all_time.weeks is None and all_time.n == 2
 
     def test_second_review_has_nothing_new_but_still_summarizes(self, review, weeks):
@@ -144,7 +144,7 @@ class TestReviewGraph:
         assert again.matured_forecast_ids == [] and again.outcomes == []
         assert again.postmortems == [] and again.decision_outcomes_recorded == 0
         assert again.scorecards.n_forecasts == 2
-        assert again.evaluation.track_record.n_forecasts == 2
+        assert again.evaluation.track_records[0].n_forecasts == 2
 
     def test_point_in_time(self, review, weeks, outcome_store):
         """At week 0's evaluation time only week 0 is reviewed; week 1 has not matured."""
@@ -154,7 +154,7 @@ class TestReviewGraph:
         assert [p.forecast_id for p in state.postmortems] == [weeks[0].forecast_id]
         assert outcome_store.get(weeks[1].forecast_id) is None
         assert state.scorecards.n_forecasts == 1
-        assert state.evaluation.track_record.n_forecasts == 1
+        assert state.evaluation.track_records[0].n_forecasts == 1
 
     def test_unresolved_is_not_learned_from(self, review, weeks, outcome_store):
         """Prices not yet published: nothing is stored, learned or counted; retried next run."""
@@ -196,7 +196,7 @@ class TestFailureIsolation:
         assert state.errors == ["scorecards: disk I/O error"]
         assert "scorecards" not in state.completed_steps and state.scorecards is None
         assert state.completed_steps[-1] == "track_record"
-        assert state.evaluation.track_record.n_forecasts == 2
+        assert state.evaluation.track_records[0].n_forecasts == 2
 
     def test_one_bad_forecast_does_not_block_the_others(
         self, review, weeks, learning_store, monkeypatch

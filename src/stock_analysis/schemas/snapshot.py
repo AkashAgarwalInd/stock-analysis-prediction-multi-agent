@@ -24,6 +24,40 @@ from stock_analysis.schemas.forecast_pipeline import CriticResult, FinalForecast
 # Calibration version 0 means "uncalibrated": no stored calibration was applied.
 UNCALIBRATED_VERSION = 0
 
+# Where a forecast was made: a live run, or a simulated week of a historical backtest
+ForecastSource = Literal["live", "backtest"]
+FORECAST_SOURCES: tuple[ForecastSource, ...] = ("live", "backtest")
+FORECAST_SOURCE_LABELS: dict[str, str] = {"live": "Live", "backtest": "Backtest (simulated)"}
+
+# Disabled-analyst reasons the backtest recorded in ``data_inputs`` before snapshots
+# stored their source (alembic revision 007). Frozen: they identify those old rows,
+# whatever the backtest writes now.
+LEGACY_BACKTEST_REASONS = frozenset(
+    {
+        "quant-only backtest (LLM disabled)",
+        "fundamentals from the data source are today's values, not the as-of date's "
+        "(not point-in-time)",
+        "historical news cannot be reconstructed point-in-time (Plan.md §34)",
+    }
+)
+
+
+def resolve_forecast_source(
+    stored: Optional[str], data_inputs: dict[str, Any]
+) -> tuple[ForecastSource, bool]:
+    """The source of a forecast and whether it was inferred rather than stored.
+
+    Snapshots stored before revision 007 have no source: they count as backtest
+    when ``data_inputs`` records one of the backtest's disabled-analyst reasons
+    (every backtest did), and as live otherwise.
+    """
+    if stored is not None:
+        if stored not in FORECAST_SOURCES:
+            raise ValueError(f"Unknown forecast source {stored!r}")
+        return stored, False
+    reasons = (data_inputs.get("disabled_analysts") or {}).values()
+    return ("backtest" if LEGACY_BACKTEST_REASONS & set(reasons) else "live"), True
+
 
 def canonical_json(value: Any) -> str:
     """Serialize ``value`` deterministically (sorted keys, no whitespace)."""
@@ -185,6 +219,8 @@ class ForecastSnapshot(BaseModel):
     calibration: Optional[AppliedCalibration] = None
     # Shadow forecast (Plan.md §23): the quant baseline before calibration
     uncalibrated_baseline: Optional[dict[str, Any]] = None
+    # None only for snapshots stored before sources were recorded; see ``effective_source``
+    source: Optional[ForecastSource] = None
 
     @model_validator(mode="after")
     def _validate_lineage(self) -> ForecastSnapshot:
@@ -216,6 +252,16 @@ class ForecastSnapshot(BaseModel):
     def shadow_baseline(self) -> dict[str, Any]:
         """The uncalibrated quant baseline (the quant baseline itself when uncalibrated)."""
         return self.uncalibrated_baseline or self.quant_baseline
+
+    @property
+    def effective_source(self) -> ForecastSource:
+        """``source``, or for an older snapshot the source inferred from its inputs."""
+        return resolve_forecast_source(self.source, self.data_inputs)[0]
+
+    @property
+    def source_inferred(self) -> bool:
+        """True when the snapshot was stored without a source."""
+        return self.source is None
 
     @model_validator(mode="after")
     def _validate_data_snapshot_id(self) -> ForecastSnapshot:

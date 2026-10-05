@@ -38,6 +38,7 @@ from stock_analysis.learning.report import (
     render_probability_calibration,
     render_scorecards,
     render_track_record,
+    render_track_records,
 )
 from stock_analysis.learning.scorecards import (
     analyst_scorecards,
@@ -81,6 +82,7 @@ __all__ = [
     "render_probability_calibration",
     "render_scorecards",
     "render_track_record",
+    "render_track_records",
     "retire_stale_lessons",
     "run_postmortem",
     "update_calibration",

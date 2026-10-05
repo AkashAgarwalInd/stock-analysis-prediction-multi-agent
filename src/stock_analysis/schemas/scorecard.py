@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from stock_analysis.schemas.snapshot import ForecastSource
+
 
 class ScoredForecast(BaseModel):
     """One scored original forecast with the attributes scorecards group by."""
@@ -32,6 +34,10 @@ class ScoredForecast(BaseModel):
     abs_error_pct: float
     brier: float
     analyst_hits: dict[str, bool] = Field(default_factory=dict)
+    source: ForecastSource = "live"
+    source_inferred: bool = Field(
+        default=False, description="Stored before sources were recorded; source inferred"
+    )
 
 
 class HitRate(BaseModel):
@@ -104,6 +110,8 @@ class Scorecards(BaseModel):
     overlapping_excluded: int = Field(
         default=0, description="Forecasts left out because their window overlaps a later one"
     )
+    # Independent forecasts per source (live / backtest); the scorecards pool them
+    sources: dict[str, int] = Field(default_factory=dict)
     min_samples: int
     analysts: list[AnalystScorecard]
     by_regime: list[GroupScore]

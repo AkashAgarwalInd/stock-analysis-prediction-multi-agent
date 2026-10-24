@@ -9,7 +9,7 @@ from stock_analysis.langgraph.runner import run_forecast
 from stock_analysis.langgraph.workflow import format_prior_context
 from stock_analysis.schemas.memory import LessonCandidate, LessonEvidenceKind, MemoryContext
 from stock_analysis.snapshots import find_unsupported_numbers
-from tests.forecast_helpers import FakeLLM, run_graph
+from tests.forecast_helpers import MADE_AT, FakeLLM, run_graph
 from tests.outcome_helpers import FakePriceSource
 
 # The runner reviews matured forecasts first; keep that review offline
@@ -31,9 +31,12 @@ class TestSecondRunReceivesPriorContext:
         assert "PRIOR CONTEXT" not in llm.predictor_prompts[0]
 
     def test_second_run_sees_first_forecast(self, initial_state, store, memory_store):
-        first = run_graph(FakeLLM("valid"), initial_state, store, memory_store)
+        # Both runs before the first target date, so it is not yet awaiting evaluation
+        first_state = initial_state.model_copy(update={"run_at": MADE_AT})
+        first = run_graph(FakeLLM("valid"), first_state, store, memory_store)
         llm = FakeLLM("valid")
-        second = run_graph(llm, initial_state, store, memory_store)
+        second_state = initial_state.model_copy(update={"run_at": MADE_AT + timedelta(hours=1)})
+        second = run_graph(llm, second_state, store, memory_store)
 
         context = MemoryContext.model_validate(second.memory_context)
         assert [f.forecast_id for f in context.prior_forecasts] == [first.forecast_id]

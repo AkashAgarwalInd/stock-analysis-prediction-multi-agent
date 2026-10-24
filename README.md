@@ -90,6 +90,24 @@ ships. `--no-llm` skips the LLM entirely.
 
 ## How it works
 
+```mermaid
+flowchart TD
+    U(["You: stock-analysis analyze RELIANCE"]) --> G["Gather data<br/>prices, fundamentals, news, market mood"]
+    G --> A["Four AI analysts<br/>each give a view"]
+    A --> C["Rules combine the views<br/>market regime and risk"]
+    C --> S["Simulation gives the baseline<br/>price range and chance of up / flat / down"]
+    S --> P["AI may nudge the baseline<br/>a checker enforces the limits"]
+    P --> F[("Forecast saved<br/>never changed afterwards")]
+    F --> W["After 5 trading days<br/>score against real prices"]
+    W --> L["Learn: explain misses,<br/>lessons, calibration"]
+    L -. used by the next forecast .-> G
+```
+
+Image version: [docs/diagrams/01-big-picture.svg](docs/diagrams/01-big-picture.svg)
+
+Step-by-step diagrams of each flow — the forecast agents, review, learning, backtest, safety
+guards and storage — are in [docs/architecture.md](docs/architecture.md).
+
 ```text
 review_matured → memory_loader → 4 analysts (parallel) → guardrails → decision_engine
   → quant_baseline (calibrated; the uncalibrated shadow is kept) → adjustment_gate
